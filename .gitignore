@@ -17,3 +17,6 @@ server/uploads/
 *.webm
 .DS_Store
 dist/
+ai-service/models/*.csv
+ai-service/models/*.joblib
+ai-service/models/*.pt
