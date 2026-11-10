@@ -1,0 +1,59 @@
+{
+  "note": "SYNTHETIC SMOKE-TEST DATA \u2014 numbers are not representative of real-world performance.",
+  "accuracy": 0.6751,
+  "macro_precision": 0.5897,
+  "macro_recall": 0.191,
+  "macro_f1": 0.1972,
+  "per_class": {
+    "deletion": {
+      "precision": 1.0,
+      "recall": 0.0714,
+      "f1-score": 0.1333,
+      "support": 28.0
+    },
+    "duplication": {
+      "precision": 1.0,
+      "recall": 0.0093,
+      "f1-score": 0.0183,
+      "support": 108.0
+    },
+    "frame_drop": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1-score": 0.0,
+      "support": 128.0
+    },
+    "insertion": {
+      "precision": 0.0138,
+      "recall": 0.1611,
+      "f1-score": 0.0254,
+      "support": 180.0
+    },
+    "none": {
+      "precision": 0.9347,
+      "recall": 0.7131,
+      "f1-score": 0.809,
+      "support": 7047.0
+    }
+  },
+  "mean_abs_boundary_error_frames": {
+    "deletion": 213.5,
+    "duplication": 490.5,
+    "frame_drop": 704.5,
+    "insertion": 3.0
+  },
+  "cv_on_train_split": {
+    "test_accuracy": {
+      "mean": 0.9080436506800382,
+      "std": 0.03956050240426289
+    },
+    "test_f1_macro": {
+      "mean": 0.265457699393874,
+      "std": 0.032604356553839656
+    },
+    "test_f1_weighted": {
+      "mean": 0.8942019289069956,
+      "std": 0.024116296267922815
+    }
+  }
+}

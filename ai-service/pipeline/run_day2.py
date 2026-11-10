@@ -2,14 +2,13 @@
 run_day2.py – One-command Day 2 entry point.
 
 Steps (in order):
-  0. If ai-service/dataset/generated/ is empty, auto-run:
+  0. If ai-service/dataset/generated/ is empty or labels.csv missing, auto-run:
        a. make_synthetic_sources.py  → sources/
        b. generate_dataset.py        → generated/  (seed=42, rounds=2)
-  1. pipeline/features.py    – extract & cache per-video features
-  2. pipeline/build_table.py – assemble labeled feature table
-  3. pipeline/plot_features.py – feature-over-time plots per class
-  4. pipeline/train_rf.py    – train Random Forest
-  5. pipeline/evaluate.py    – compute & print metrics
+  1. pipeline/build_table.py   – extracts & caches features, assembles labeled table
+  2. pipeline/plot_features.py – feature-over-time plots per class with edit lines
+  3. pipeline/train_rf.py      – train Random Forest (GroupShuffleSplit 80/20 + GroupKFold-5)
+  4. pipeline/evaluate.py      – compute & print metrics, confusion & importance PNGs
 
 Usage (from ai-service/):
   python -m pipeline.run_day2
@@ -18,6 +17,7 @@ Usage (from ai-service/):
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 import time
@@ -28,7 +28,17 @@ AI_SERVICE = _HERE.parent
 
 GENERATED_DIR = AI_SERVICE / "dataset" / "generated"
 SOURCES_DIR   = AI_SERVICE / "dataset" / "sources"
-LABELS_CSV    = GENERATED_DIR / "labels.csv"
+
+
+def _find_labels_csv() -> Path | None:
+    candidates = [
+        GENERATED_DIR / "labels.csv",
+        AI_SERVICE / "dataset" / "labels.csv",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
 
 
 def _has_videos(directory: Path) -> bool:
@@ -49,15 +59,15 @@ def _run_py(script: Path, *args: str) -> None:
 
 def main() -> None:
     force = "--force" in sys.argv
-    force_flag = ["--force"] if force else []
 
     print("\n" + "=" * 60)
     print("  DAY 2 PIPELINE  –  Video Edit Detection")
     print("=" * 60)
 
     # ── Step 0: ensure dataset exists ──────────────────────────────
-    if not LABELS_CSV.exists() or not _has_videos(GENERATED_DIR):
-        print("\n⚡ No generated dataset found. Creating synthetic data first …")
+    labels_csv = _find_labels_csv()
+    if labels_csv is None or not _has_videos(GENERATED_DIR):
+        print("\n⚡ Dataset not found. Generating synthetic test dataset …")
 
         if not _has_videos(SOURCES_DIR):
             print("  → Generating synthetic source clips …")
@@ -74,46 +84,53 @@ def main() -> None:
             "--seed",    "42",
             "--rounds",  "2",
         )
-    else:
-        print(f"\n✓ Dataset found ({sum(1 for _ in GENERATED_DIR.glob('*.mp4'))} videos)")
+        labels_csv = _find_labels_csv()
 
-    if not LABELS_CSV.exists():
-        print("✗  labels.csv still missing after generation. Aborting.")
+    if labels_csv is None:
+        print("✗  labels.csv missing. Aborting.")
         sys.exit(1)
 
-    # ── Step 1-6: pipeline ─────────────────────────────────────────
+    # Ensure labels.csv exists in both dataset/ and dataset/generated/ for consistency
+    target_in_gen = GENERATED_DIR / "labels.csv"
+    if not target_in_gen.exists() and labels_csv != target_in_gen:
+        shutil.copy2(labels_csv, target_in_gen)
+
+    n_vids = sum(1 for _ in GENERATED_DIR.glob("*.mp4"))
+    print(f"\n✓ Dataset ready: {n_vids} videos in {GENERATED_DIR}")
+    print(f"✓ Labels: {labels_csv}")
+
+    # ── Step 1: build feature table ────────────────────────────────
     print("\n" + "=" * 60)
-    print("STEP 1 / 5 – Feature extraction")
+    print("STEP 1 / 4 – Feature extraction & Table building")
     print("=" * 60)
     from pipeline.build_table import build_table
     table = build_table(force=force)
 
+    # ── Step 2: feature trajectories plot ──────────────────────────
     print("\n" + "=" * 60)
-    print("STEP 2 / 5 – Feature plots")
+    print("STEP 2 / 4 – Feature plots per class")
     print("=" * 60)
     from pipeline.plot_features import plot_features
     plot_features(table)
 
+    # ── Step 3: train Random Forest ────────────────────────────────
     print("\n" + "=" * 60)
-    print("STEP 3 / 5 – Train Random Forest")
+    print("STEP 3 / 4 – Train Random Forest (GroupShuffleSplit 80/20 + GroupKFold-5)")
     print("=" * 60)
     from pipeline.train_rf import train
     rf, le, cv_res = train(force=force)
 
+    # ── Step 4: evaluate ───────────────────────────────────────────
     print("\n" + "=" * 60)
-    print("STEP 4 / 5 – Evaluate")
+    print("STEP 4 / 4 – Evaluation & Metrics")
     print("=" * 60)
     from pipeline.evaluate import evaluate, print_metrics
     metrics = evaluate(force=force)
-
-    print("\n" + "=" * 60)
-    print("STEP 5 / 5 – Results")
-    print("=" * 60)
     print_metrics(metrics)
 
     models_dir = AI_SERVICE / "models"
     plots_dir  = models_dir / "plots"
-    print("\nOutputs:")
+    print("\nGenerated Artifacts:")
     print(f"  Model         → {models_dir / 'rf.joblib'}")
     print(f"  Metrics JSON  → {models_dir / 'rf_metrics.json'}")
     print(f"  Feature plots → {plots_dir}/features_*.png")
@@ -124,4 +141,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

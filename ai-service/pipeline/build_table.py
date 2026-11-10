@@ -14,7 +14,9 @@ Columns: video, source_file, pair_idx, label, <14 feature columns>
 
 from __future__ import annotations
 
+import os
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -28,11 +30,21 @@ sys.path.insert(0, str(AI_SERVICE))
 from pipeline.features import extract_features, FEATURE_NAMES, CACHE_DIR
 
 GENERATED_DIR = AI_SERVICE / "dataset" / "generated"
-LABELS_CSV    = GENERATED_DIR / "labels.csv"
 MODELS_DIR    = AI_SERVICE / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 TOLERANCE = 3   # ±frames around edit boundary that also get labeled as edit
+
+
+def _find_labels_csv() -> Path:
+    candidates = [
+        GENERATED_DIR / "labels.csv",
+        AI_SERVICE / "dataset" / "labels.csv",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return GENERATED_DIR / "labels.csv"
 
 
 def _label_pairs(n_pairs: int, row: pd.Series) -> np.ndarray:
@@ -43,14 +55,24 @@ def _label_pairs(n_pairs: int, row: pd.Series) -> np.ndarray:
     mask = np.zeros(n_pairs, dtype=bool)
     start = int(row["start_frame"])
     end   = int(row["end_frame"])
-    # treat unedited as "none" (no mask)
-    if row["edit_type"] == "unedited":
+    # treat unedited or negative frame indicators as "none" (no mask)
+    if row["edit_type"] in ("unedited", "none") or start < 0 or end < 0:
         return mask
     lo = max(0, start - TOLERANCE)
     hi = min(n_pairs - 1, end + TOLERANCE)
     if lo <= hi:
         mask[lo: hi + 1] = True
     return mask
+
+
+def _extract_worker(path_str: str) -> tuple[str, bool, str]:
+    """Worker function for multiprocessing feature extraction."""
+    try:
+        p = Path(path_str)
+        extract_features(p, desc=None)
+        return (path_str, True, "")
+    except Exception as exc:
+        return (path_str, False, str(exc))
 
 
 def build_table(force: bool = False) -> pd.DataFrame:
@@ -64,26 +86,56 @@ def build_table(force: bool = False) -> pd.DataFrame:
         print(f"Loading cached table from {out_csv}")
         return pd.read_csv(out_csv)
 
-    if not LABELS_CSV.exists():
+    labels_csv = _find_labels_csv()
+    if not labels_csv.exists():
         raise FileNotFoundError(
-            f"labels.csv not found at {LABELS_CSV}\n"
+            f"labels.csv not found at {labels_csv}\n"
             "Run the dataset generator first:\n"
             "  python ai-service/dataset/generate_dataset.py --sources ai-service/dataset/sources/"
         )
 
-    df_labels = pd.read_csv(LABELS_CSV)
-    rows: list[dict] = []
+    df_labels = pd.read_csv(labels_csv)
 
-    for video_file, grp in tqdm(df_labels.groupby("output_file"), desc="Building table"):
+    # 1. Gather all unique video paths
+    unique_videos = [
+        GENERATED_DIR / Path(f).name
+        for f in df_labels["output_file"].unique()
+        if (GENERATED_DIR / Path(f).name).exists()
+    ]
+    print(f"Found {len(unique_videos)} videos to process in {GENERATED_DIR}")
+
+    # Check which need feature extraction
+    missing = [
+        v for v in unique_videos
+        if force or not (CACHE_DIR / f"{v.stem}.npy").exists()
+    ]
+
+    if missing:
+        n_workers = max(1, min(8, (os.cpu_count() or 4) - 2))
+        print(f"Extracting features for {len(missing)} videos ({n_workers} worker processes) …")
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = {
+                executor.submit(_extract_worker, str(v)): v
+                for v in missing
+            }
+            for fut in tqdm(as_completed(futures), total=len(futures), desc="Feature extraction"):
+                path_str, ok, err = fut.result()
+                if not ok:
+                    print(f"  ⚠ Failed {Path(path_str).name}: {err}")
+    else:
+        print(f"All {len(unique_videos)} videos already have cached features.")
+
+    # 2. Build rows
+    rows: list[dict] = []
+    for video_file, grp in tqdm(df_labels.groupby("output_file"), desc="Assembling table"):
         video_path = GENERATED_DIR / Path(video_file).name
         if not video_path.exists():
-            print(f"  ⚠  Missing video: {video_path.name} – skipping")
             continue
 
         try:
-            feats = extract_features(video_path, desc=video_path.stem)
+            feats = extract_features(video_path, desc=None)
         except Exception as exc:
-            print(f"  ⚠  Feature extraction failed for {video_path.name}: {exc}")
+            print(f"  ⚠ Cannot load features for {video_path.name}: {exc}")
             continue
 
         n_pairs = len(feats)
@@ -115,13 +167,14 @@ def build_table(force: bool = False) -> pd.DataFrame:
         raise RuntimeError("No rows were generated – check that generated/ contains videos.")
 
     table = pd.DataFrame(rows)
+
     # Save
     try:
         table.to_parquet(out_parquet, index=False)
-        print(f"✓ Feature table saved → {out_parquet}  ({len(table):,} rows)")
+        print(f"\n✓ Feature table saved → {out_parquet}  ({len(table):,} rows)")
     except Exception:
         table.to_csv(out_csv, index=False)
-        print(f"✓ Feature table saved → {out_csv}  ({len(table):,} rows)")
+        print(f"\n✓ Feature table saved → {out_csv}  ({len(table):,} rows)")
 
     # Class distribution
     dist = table["label"].value_counts()
@@ -134,4 +187,3 @@ def build_table(force: bool = False) -> pd.DataFrame:
 
 if __name__ == "__main__":
     build_table(force="--force" in sys.argv)
-
