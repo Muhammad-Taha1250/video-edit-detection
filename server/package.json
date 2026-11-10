@@ -1,0 +1,17 @@
+{
+  "name": "video-edit-detection-server",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Express + MySQL backend for the Video Edit Detection & Frame Extraction System",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "cors": "^2.8.5",
+    "mysql2": "^3.10.0",
+    "dotenv": "^16.4.5"
+  }
+}
