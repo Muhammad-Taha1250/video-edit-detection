@@ -1,0 +1,87 @@
+{
+  "note": "SYNTHETIC SMOKE-TEST DATA \u2014 numbers verify pipeline mechanics; swap real videos for final training.",
+  "macro_f1": 0.4375,
+  "video_level_accuracy": 0.71,
+  "false_positives_per_clean_video": 0.55,
+  "mean_boundary_error_frames": 1.26,
+  "per_class": {
+    "deletion": {
+      "precision": 0.2121,
+      "recall": 0.35,
+      "f1": 0.2642,
+      "tp": 7,
+      "fp": 26,
+      "fn": 13,
+      "mean_boundary_error_frames": 1.43
+    },
+    "duplication": {
+      "precision": 0.5263,
+      "recall": 0.5,
+      "f1": 0.5128,
+      "tp": 10,
+      "fp": 9,
+      "fn": 10,
+      "mean_boundary_error_frames": 1.3
+    },
+    "frame_drop": {
+      "precision": 0.8333,
+      "recall": 0.25,
+      "f1": 0.3846,
+      "tp": 5,
+      "fp": 1,
+      "fn": 15,
+      "mean_boundary_error_frames": 1.7
+    },
+    "insertion": {
+      "precision": 0.4839,
+      "recall": 0.75,
+      "f1": 0.5882,
+      "tp": 15,
+      "fp": 16,
+      "fn": 5,
+      "mean_boundary_error_frames": 1.0
+    }
+  },
+  "nested_fold_thresholds": {
+    "clip_01_landscape_slow.mp4": {
+      "thresh_cut": 0.35,
+      "thresh_fd": 0.2
+    },
+    "clip_02_landscape_fast.mp4": {
+      "thresh_cut": 0.35,
+      "thresh_fd": 0.2
+    },
+    "clip_03_portrait.mp4": {
+      "thresh_cut": 0.35,
+      "thresh_fd": 0.2
+    },
+    "clip_04_landscape_noise.mp4": {
+      "thresh_cut": 0.35,
+      "thresh_fd": 0.2
+    },
+    "clip_05_widescreen.mp4": {
+      "thresh_cut": 0.35,
+      "thresh_fd": 0.2
+    },
+    "clip_06_landscape_grad.mp4": {
+      "thresh_cut": 0.35,
+      "thresh_fd": 0.2
+    },
+    "clip_07_portrait_fast.mp4": {
+      "thresh_cut": 0.35,
+      "thresh_fd": 0.2
+    },
+    "clip_08_square_like.mp4": {
+      "thresh_cut": 0.35,
+      "thresh_fd": 0.2
+    },
+    "clip_09_landscape_multi.mp4": {
+      "thresh_cut": 0.35,
+      "thresh_fd": 0.2
+    },
+    "clip_10_landscape_dark.mp4": {
+      "thresh_cut": 0.35,
+      "thresh_fd": 0.2
+    }
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "macro_f1": 0.5733,
+  "video_level_accuracy": 0.7,
+  "false_positives_per_clean_video": 0.25,
+  "mean_boundary_error_frames": 1.44,
+  "per_class": {
+    "deletion": {
+      "threshold": 0.35,
+      "precision": 0.1429,
+      "recall": 0.25,
+      "f1": 0.1818,
+      "tp": 5,
+      "fp": 30,
+      "fn": 15,
+      "mean_boundary_error_frames": 1.4
+    },
+    "duplication": {
+      "threshold": 0.25,
+      "precision": 0.7778,
+      "recall": 0.7,
+      "f1": 0.7368,
+      "tp": 14,
+      "fp": 4,
+      "fn": 6,
+      "mean_boundary_error_frames": 1.43
+    },
+    "frame_drop": {
+      "threshold": 0.2,
+      "precision": 0.6,
+      "recall": 0.3,
+      "f1": 0.4,
+      "tp": 6,
+      "fp": 4,
+      "fn": 14,
+      "mean_boundary_error_frames": 2.0
+    },
+    "insertion": {
+      "threshold": 0.15,
+      "precision": 1.0,
+      "recall": 0.95,
+      "f1": 0.9744,
+      "tp": 19,
+      "fp": 0,
+      "fn": 1,
+      "mean_boundary_error_frames": 1.29
+    }
+  }
+}
