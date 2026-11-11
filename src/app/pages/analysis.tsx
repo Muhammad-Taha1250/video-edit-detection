@@ -15,282 +15,451 @@ import {
   Activity,
   ArrowLeft,
   Loader2,
+  Clock,
+  Layers,
+  Sparkles,
+  Info,
 } from "lucide-react";
-import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
-import { fetchVideoDetail, VideoDetail } from "../lib/api";
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+  ReferenceLine,
+} from "recharts";
+import { getResults, getFrameUrl, AnalysisResultsResponse, EditEvent } from "../lib/api";
 
 export function AnalysisPage() {
   const { id } = useParams();
-  const [data, setData] = useState<VideoDetail | null>(null);
+  const [data, setData] = useState<AnalysisResultsResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!id) return;
     setLoading(true);
-    fetchVideoDetail(id)
+    setError(null);
+    getResults(id)
       .then(setData)
       .catch((err) => {
         console.error(err);
-        setError(true);
+        setError(err.message || "Failed to load video analysis");
       })
       .finally(() => setLoading(false));
   }, [id]);
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-24">
-        <Loader2 className="size-8 animate-spin text-blue-600" />
+      <div className="flex flex-col items-center justify-center py-28 space-y-4">
+        <Loader2 className="size-10 animate-spin text-blue-600" />
+        <p className="text-muted-foreground font-medium">Loading analysis results...</p>
       </div>
     );
   }
 
-  if (error || !data || !data.video) {
+  if (error || !data || !data.summary) {
     return (
-      <div className="text-center py-12 space-y-4">
-        <p className="text-muted-foreground">
-          {error
-            ? "Could not connect to the API. Make sure the backend server is running on port 4000."
-            : "Analysis not found"}
+      <div className="text-center py-16 space-y-4 max-w-md mx-auto">
+        <div className="mx-auto w-12 h-12 bg-red-100 rounded-full flex items-center justify-center">
+          <AlertTriangle className="size-6 text-red-600" />
+        </div>
+        <h2 className="text-xl font-bold">Analysis Not Found or Server Error</h2>
+        <p className="text-sm text-muted-foreground">
+          {error || "Could not retrieve analysis for this video. Make sure backend servers are running."}
         </p>
-        <Button asChild>
-          <Link to="/history">
-            <ArrowLeft className="size-4 mr-2" />
-            Back to History
-          </Link>
-        </Button>
+        <div className="pt-2">
+          <Button asChild>
+            <Link to="/history">
+              <ArrowLeft className="size-4 mr-2" />
+              Back to History
+            </Link>
+          </Button>
+        </div>
       </div>
     );
   }
 
-  const { video, result, frames } = data;
-  const totalFrames = result?.total_frames || 0;
-  const editsDetected = result?.edits_detected || 0;
-  const tamperedPercentage = totalFrames > 0 ? ((editsDetected / totalFrames) * 100).toFixed(2) : "0";
-
-  // Chart data built from real detected_frames rows
-  const confidenceData = frames.map((f) => ({
-    frame: f.frame_number,
-    confidence: Math.round(f.difference_score * 100),
-  }));
-
-  const anomalyTypes = ["Color Inconsistency", "Blur Artifact", "Compression Anomaly", "Frame Duplication"];
-  const anomalyDistribution = anomalyTypes.map((type, i) => ({
-    type,
-    count: frames.filter((_, idx) => idx % anomalyTypes.length === i).length,
-  }));
+  const { summary, events, series } = data;
+  const editsDetected = summary.edits_detected || events.length || 0;
+  const isClean = editsDetected === 0;
 
   const downloadReport = () => {
-    const report = {
-      video,
-      result,
-      frames,
-    };
-    const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `analysis-report-${video.video_id}.json`;
+    a.download = `analysis-report-${summary.video_id}-${summary.filename}.json`;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const formatEditBadge = (type: string) => {
+    switch (type.toLowerCase()) {
+      case "deletion":
+        return <Badge variant="destructive">Deletion Cut</Badge>;
+      case "insertion":
+        return <Badge className="bg-blue-600 hover:bg-blue-700">Segment Insertion</Badge>;
+      case "duplication":
+        return <Badge className="bg-purple-600 hover:bg-purple-700">Frame Duplication</Badge>;
+      case "frame_drop":
+        return <Badge className="bg-amber-600 hover:bg-amber-700">Frame Drop</Badge>;
+      default:
+        return <Badge variant="secondary">{type}</Badge>;
+    }
+  };
+
+  const formatRoleLabel = (role: string) => {
+    switch (role) {
+      case "before":
+        return "Before Cut (Pre-edit)";
+      case "junction":
+        return "Junction Frame (First Post-cut)";
+      case "after":
+        return "After Cut (Post-edit)";
+      case "before_start":
+        return "Before Start (Pre-edit)";
+      case "start":
+        return "Start Junction";
+      case "after_start":
+        return "After Start (Interior)";
+      case "before_end":
+        return "Before End (Interior)";
+      case "end":
+        return "End Junction";
+      case "after_end":
+        return "After End (Resumed)";
+      default:
+        return role;
+    }
   };
 
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-start justify-between">
+      <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
         <div className="space-y-1">
           <div className="flex items-center gap-2">
             <Button asChild variant="ghost" size="sm">
               <Link to="/history">
                 <ArrowLeft className="size-4 mr-2" />
-                Back
+                Back to History
               </Link>
             </Button>
           </div>
           <h1 className="text-3xl font-bold">Analysis Results</h1>
-          <p className="text-muted-foreground">{video.filename}</p>
+          <p className="text-muted-foreground font-mono text-sm">{summary.filename}</p>
         </div>
-        <Button onClick={downloadReport}>
-          <Download className="size-4 mr-2" />
-          Download Report
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={downloadReport} variant="outline">
+            <Download className="size-4 mr-2" />
+            Download JSON Report
+          </Button>
+        </div>
       </div>
 
       {/* Summary Cards */}
-      <div className="grid md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
         <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Total Frames</CardTitle>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-xs font-medium text-muted-foreground">Duration</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="flex items-center gap-2">
-              <Film className="size-5 text-blue-600" />
-              <span className="text-2xl font-bold">{totalFrames}</span>
+              <Clock className="size-4 text-blue-600" />
+              <span className="text-xl font-bold">{summary.duration}s</span>
             </div>
           </CardContent>
         </Card>
 
         <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Tampered Frames</CardTitle>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-xs font-medium text-muted-foreground">Frame Rate</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="flex items-center gap-2">
-              <AlertTriangle className="size-5 text-red-600" />
-              <span className="text-2xl font-bold text-red-600">{editsDetected}</span>
+              <Activity className="size-4 text-indigo-600" />
+              <span className="text-xl font-bold">{summary.fps} fps</span>
             </div>
           </CardContent>
         </Card>
 
         <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Confidence</CardTitle>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-xs font-medium text-muted-foreground">Total Frames</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="flex items-center gap-2">
-              <Activity className="size-5 text-green-600" />
-              <span className="text-2xl font-bold">{(result?.confidence_score || 0).toFixed(1)}%</span>
+              <Film className="size-4 text-blue-600" />
+              <span className="text-xl font-bold">{summary.total_frames}</span>
             </div>
           </CardContent>
         </Card>
 
         <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Status</CardTitle>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-xs font-medium text-muted-foreground">Edits Detected</CardTitle>
           </CardHeader>
           <CardContent>
-            <Badge variant={editsDetected > 5 ? "destructive" : "secondary"} className="text-sm">
-              {editsDetected > 5 ? "Suspicious" : "Clean"}
+            <div className="flex items-center gap-2">
+              <AlertTriangle className={`size-4 ${isClean ? "text-green-600" : "text-red-600"}`} />
+              <span className={`text-xl font-bold ${isClean ? "text-green-600" : "text-red-600"}`}>
+                {editsDetected}
+              </span>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-xs font-medium text-muted-foreground">Confidence</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="flex items-center gap-2">
+              <Sparkles className="size-4 text-purple-600" />
+              <span className="text-xl font-bold">{(summary.confidence_score || 0).toFixed(1)}%</span>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-xs font-medium text-muted-foreground">Verdict</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <Badge variant={isClean ? "secondary" : "destructive"} className="text-xs">
+              {isClean ? "No edits detected" : "Edited / Modified"}
             </Badge>
           </CardContent>
         </Card>
       </div>
 
-      {/* Analysis Tabs */}
-      <Tabs defaultValue="overview" className="space-y-4">
+      {/* Note under summary cards */}
+      <div className="flex items-center gap-2 text-xs text-muted-foreground bg-slate-50 border border-slate-200 rounded-md p-2.5">
+        <Info className="size-4 text-slate-500 flex-shrink-0" />
+        <span>
+          Detection covers cuts, insertions, duplicated frames and dropped frames. Not detecting an edit does not guarantee the video is authentic.
+        </span>
+      </div>
+
+      {/* Tabs */}
+      <Tabs defaultValue="events" className="space-y-4">
         <TabsList>
-          <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="frames">Frame Analysis</TabsTrigger>
-          <TabsTrigger value="charts">Visualizations</TabsTrigger>
-          <TabsTrigger value="details">Details</TabsTrigger>
+          <TabsTrigger value="events">Detected Edits ({events.length})</TabsTrigger>
+          <TabsTrigger value="chart">Cut Probability Curve</TabsTrigger>
+          <TabsTrigger value="frames">Junction Frames</TabsTrigger>
+          <TabsTrigger value="details">Technical Details</TabsTrigger>
         </TabsList>
 
-        {/* Overview Tab */}
-        <TabsContent value="overview" className="space-y-4">
+        {/* Events Tab */}
+        <TabsContent value="events" className="space-y-4">
+          {events.length === 0 ? (
+            <Card className="border-green-200 bg-green-50/50">
+              <CardContent className="py-12 text-center space-y-3">
+                <div className="mx-auto w-12 h-12 bg-green-100 rounded-full flex items-center justify-center">
+                  <CheckCircle className="size-6 text-green-600" />
+                </div>
+                <h3 className="text-lg font-semibold text-green-900">No Edits Detected</h3>
+                <p className="text-sm text-green-700 max-w-md mx-auto">
+                  The model did not find any deletion cuts, inserted segments, duplicated frames, or rate-change drops in this clip.
+                </p>
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="space-y-4">
+              <Card>
+                <CardHeader>
+                  <CardTitle>Edit Event Timeline</CardTitle>
+                  <CardDescription>
+                    Temporal boundaries and classifications identified by the two-stage model
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="p-0">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-slate-50 border-b text-muted-foreground">
+                        <tr>
+                          <th className="py-3 px-4 text-left">#</th>
+                          <th className="py-3 px-4 text-left">Edit Type</th>
+                          <th className="py-3 px-4 text-left">Frame Range</th>
+                          <th className="py-3 px-4 text-left">Timestamp (sec)</th>
+                          <th className="py-3 px-4 text-left">Confidence</th>
+                          <th className="py-3 px-4 text-left">Frames Captured</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y">
+                        {events.map((ev, idx) => {
+                          const frameCount = ev.extracted_frames ? Object.keys(ev.extracted_frames).length : 0;
+                          return (
+                            <tr key={ev.segment_id || idx} className="hover:bg-slate-50/60">
+                              <td className="py-3 px-4 font-mono font-medium">{idx + 1}</td>
+                              <td className="py-3 px-4">{formatEditBadge(ev.edit_type)}</td>
+                              <td className="py-3 px-4 font-mono">
+                                {ev.start_frame === ev.end_frame
+                                  ? `Frame ${ev.start_frame}`
+                                  : `Frames ${ev.start_frame} → ${ev.end_frame}`}
+                              </td>
+                              <td className="py-3 px-4 text-muted-foreground">
+                                {ev.start_time === ev.end_time
+                                  ? `${ev.start_time.toFixed(3)}s`
+                                  : `${ev.start_time.toFixed(3)}s – ${ev.end_time.toFixed(3)}s`}
+                              </td>
+                              <td className="py-3 px-4 font-medium">
+                                {(ev.confidence * 100).toFixed(1)}%
+                              </td>
+                              <td className="py-3 px-4 text-muted-foreground">
+                                {frameCount > 0 ? (
+                                  <span className="text-xs bg-slate-100 text-slate-700 px-2 py-0.5 rounded font-mono">
+                                    {frameCount} frames
+                                  </span>
+                                ) : (
+                                  <span className="text-xs text-muted-foreground">None</span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* In-line Frame Preview for Events */}
+              <div className="space-y-6 pt-2">
+                <h3 className="text-lg font-bold flex items-center gap-2">
+                  <Layers className="size-5 text-blue-600" />
+                  Captured Junction Frame Evidence
+                </h3>
+                {events.map((ev, idx) => {
+                  const frameKeys = ev.extracted_frames ? Object.keys(ev.extracted_frames) : [];
+                  if (frameKeys.length === 0) return null;
+
+                  return (
+                    <Card key={idx} className="border-slate-200 shadow-sm">
+                      <CardHeader className="bg-slate-50/70 border-b py-3 px-4">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <span className="font-semibold text-sm">Event {idx + 1}:</span>
+                            {formatEditBadge(ev.edit_type)}
+                            <span className="text-xs text-muted-foreground font-mono">
+                              (Frames {ev.start_frame} → {ev.end_frame} | {ev.start_time.toFixed(3)}s – {ev.end_time.toFixed(3)}s)
+                            </span>
+                          </div>
+                          <Badge variant="outline" className="text-xs">
+                            Confidence: {(ev.confidence * 100).toFixed(1)}%
+                          </Badge>
+                        </div>
+                      </CardHeader>
+                      <CardContent className="p-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+                          {frameKeys.map((role) => {
+                            const fInfo = ev.extracted_frames![role];
+                            return (
+                              <div
+                                key={role}
+                                className="border rounded-lg overflow-hidden bg-slate-900 flex flex-col"
+                              >
+                                <div className="p-2 bg-slate-800 text-slate-200 text-xs flex justify-between items-center border-b border-slate-700">
+                                  <span className="font-medium">{formatRoleLabel(role)}</span>
+                                  <span className="font-mono bg-slate-900 px-1.5 py-0.5 rounded text-[11px]">
+                                    f{fInfo.frame}
+                                  </span>
+                                </div>
+                                <div className="aspect-video bg-black flex items-center justify-center overflow-hidden">
+                                  <img
+                                    src={getFrameUrl(fInfo.url)}
+                                    alt={`${role} frame ${fInfo.frame}`}
+                                    className="w-full h-full object-contain"
+                                    loading="lazy"
+                                  />
+                                </div>
+                                <div className="p-1.5 bg-slate-800/80 text-[11px] text-slate-300 flex justify-between">
+                                  <span>Time: {(fInfo.frame / summary.fps).toFixed(3)}s</span>
+                                  <span className="text-slate-400 truncate max-w-[140px]">{fInfo.filename}</span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </CardContent>
+                    </Card>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </TabsContent>
+
+        {/* Cut Probability Chart Tab */}
+        <TabsContent value="chart" className="space-y-4">
           <Card>
             <CardHeader>
-              <CardTitle>Analysis Summary</CardTitle>
+              <CardTitle>Cut Probability Across Frame Pairs</CardTitle>
               <CardDescription>
-                Comprehensive overview of the video analysis results
+                Downsampled prediction series from the Stage 1 Cut Detector with detected event boundaries
               </CardDescription>
             </CardHeader>
-            <CardContent className="space-y-6">
-              <div className="grid md:grid-cols-2 gap-6">
+            <CardContent>
+              {!series || series.length === 0 ? (
+                <div className="py-16 text-center text-muted-foreground text-sm">
+                  No probability series data available for this video.
+                </div>
+              ) : (
                 <div className="space-y-4">
-                  <div>
-                    <h3 className="font-medium mb-2">Video Information</h3>
-                    <div className="space-y-2 text-sm">
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">File Name:</span>
-                        <span className="font-medium">{video.filename}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Upload Date:</span>
-                        <span className="font-medium">
-                          {new Date(video.upload_date).toLocaleString()}
-                        </span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">File Size:</span>
-                        <span className="font-medium">
-                          {(video.file_size / 1024 / 1024).toFixed(2)} MB
-                        </span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Format:</span>
-                        <span className="font-medium">{video.format}</span>
-                      </div>
-                    </div>
+                  <div className="h-[360px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={series} margin={{ top: 15, right: 25, left: 0, bottom: 20 }}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                        <XAxis
+                          dataKey="frame"
+                          label={{ value: "Frame Index", position: "insideBottom", offset: -10 }}
+                        />
+                        <YAxis
+                          domain={[0, 1]}
+                          label={{ value: "Cut Probability", angle: -90, position: "insideLeft" }}
+                        />
+                        <Tooltip
+                          formatter={(value: any) => [`${(Number(value) * 100).toFixed(2)}%`, "Cut Probability"]}
+                          labelFormatter={(label) => `Frame #${label}`}
+                        />
+                        <Legend verticalAlign="top" height={36} />
+                        <Line
+                          type="monotone"
+                          dataKey="prob"
+                          name="Cut Probability"
+                          stroke="#2563eb"
+                          strokeWidth={2}
+                          dot={false}
+                        />
+                        {events.map((ev, i) => (
+                          <ReferenceLine
+                            key={`ref-s-${i}`}
+                            x={ev.start_frame}
+                            stroke="#ef4444"
+                            strokeDasharray="4 4"
+                            label={{
+                              value: `${ev.edit_type} (f${ev.start_frame})`,
+                              fill: "#dc2626",
+                              fontSize: 11,
+                              position: "top",
+                            }}
+                          />
+                        ))}
+                      </LineChart>
+                    </ResponsiveContainer>
                   </div>
-
-                  <Separator />
-
-                  <div>
-                    <h3 className="font-medium mb-2">Detection Results</h3>
-                    <div className="space-y-2 text-sm">
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Frames Analyzed:</span>
-                        <span className="font-medium">{totalFrames}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Tampered Detected:</span>
-                        <span className="font-medium text-red-600">{editsDetected}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Tampering Rate:</span>
-                        <span className="font-medium">{tamperedPercentage}%</span>
-                      </div>
-                    </div>
+                  <div className="text-xs text-muted-foreground bg-slate-50 p-3 rounded-md flex items-center gap-2">
+                    <Info className="size-4 text-blue-600 flex-shrink-0" />
+                    <span>
+                      Dashed red lines mark the exact frames where junction cuts or edit transitions were identified by the model.
+                    </span>
                   </div>
                 </div>
-
-                <div className="space-y-4">
-                  <div>
-                    <h3 className="font-medium mb-2">Anomaly Distribution</h3>
-                    <div className="space-y-2">
-                      {anomalyDistribution.map((item) => (
-                        <div key={item.type} className="flex items-center gap-2">
-                          <div className="flex-1">
-                            <div className="flex justify-between text-sm mb-1">
-                              <span className="text-muted-foreground">{item.type}</span>
-                              <span className="font-medium">{item.count}</span>
-                            </div>
-                            <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
-                              <div
-                                className="h-full bg-red-600"
-                                style={{
-                                  width: `${frames.length > 0 ? (item.count / frames.length) * 100 : 0}%`,
-                                }}
-                              />
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  <Separator />
-
-                  <div>
-                    <h3 className="font-medium mb-2">Recommendation</h3>
-                    <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
-                      {editsDetected > 5 ? (
-                        <div className="flex gap-2">
-                          <AlertTriangle className="size-5 text-amber-600 flex-shrink-0" />
-                          <div className="text-sm">
-                            <p className="font-medium text-amber-900 mb-1">High Suspicion Detected</p>
-                            <p className="text-amber-700">
-                              Multiple tampered frames were detected. This video shows signs of editing
-                              and should be reviewed carefully.
-                            </p>
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="flex gap-2">
-                          <CheckCircle className="size-5 text-green-600 flex-shrink-0" />
-                          <div className="text-sm">
-                            <p className="font-medium text-green-900 mb-1">Low Risk</p>
-                            <p className="text-green-700">
-                              Minimal tampering detected. The video appears mostly authentic.
-                            </p>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
+              )}
             </CardContent>
           </Card>
         </TabsContent>
@@ -299,169 +468,138 @@ export function AnalysisPage() {
         <TabsContent value="frames" className="space-y-4">
           <Card>
             <CardHeader>
-              <CardTitle>Detected Frames (Stored in Database)</CardTitle>
+              <CardTitle>Saved Frame Evidence</CardTitle>
               <CardDescription>
-                These rows come from the detected_frames table in MySQL
+                All extracted junction frames served through the API proxy
               </CardDescription>
             </CardHeader>
             <CardContent>
-              {frames.length === 0 ? (
+              {events.length === 0 ? (
                 <p className="text-sm text-muted-foreground py-8 text-center">
-                  No suspicious frames were recorded for this video.
+                  No edit junctions were detected in this video, so no anomaly frames were saved.
                 </p>
               ) : (
-                <ScrollArea className="h-[600px] pr-4">
-                  <div className="space-y-2">
-                    {frames.map((frame) => (
-                      <div
-                        key={frame.frame_id}
-                        className="flex items-center justify-between p-4 rounded-lg border border-red-200 bg-red-50/50"
-                      >
-                        <div className="flex items-center gap-4">
-                          <div className="w-24 h-16 bg-slate-200 rounded flex items-center justify-center">
-                            <FileVideo className="size-6 text-slate-400" />
-                          </div>
-                          <div className="space-y-1">
-                            <div className="flex items-center gap-2">
-                              <span className="font-medium">Frame {frame.frame_number}</span>
-                              <Badge variant="destructive" className="text-xs">
-                                Tampered
-                              </Badge>
-                            </div>
-                            <p className="text-sm text-muted-foreground">
-                              Timestamp: {frame.timestamp}
-                            </p>
-                          </div>
-                        </div>
-                        <div className="text-right">
-                          <p className="text-sm text-muted-foreground">Difference Score</p>
-                          <p className="font-medium">{(frame.difference_score * 100).toFixed(1)}%</p>
-                        </div>
+                <div className="space-y-6">
+                  {events.map((ev, evIdx) => (
+                    <div key={evIdx} className="space-y-3">
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-sm">Event {evIdx + 1} ({ev.edit_type}):</span>
+                        <span className="text-xs text-muted-foreground font-mono">
+                          Frames {ev.start_frame} → {ev.end_frame}
+                        </span>
                       </div>
-                    ))}
-                  </div>
-                </ScrollArea>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+                        {ev.extracted_frames &&
+                          Object.entries(ev.extracted_frames).map(([role, fInfo]) => (
+                            <Card key={role} className="overflow-hidden border-slate-200 shadow-sm">
+                              <div className="p-2.5 bg-slate-50 border-b flex justify-between items-center text-xs">
+                                <span className="font-semibold text-slate-700">{formatRoleLabel(role)}</span>
+                                <Badge variant="outline" className="font-mono text-[11px]">
+                                  Frame {fInfo.frame}
+                                </Badge>
+                              </div>
+                              <div className="aspect-video bg-black flex items-center justify-center">
+                                <img
+                                  src={getFrameUrl(fInfo.url)}
+                                  alt={fInfo.filename}
+                                  className="w-full h-full object-contain"
+                                  loading="lazy"
+                                />
+                              </div>
+                              <div className="p-2 text-xs text-muted-foreground flex justify-between">
+                                <span>{(fInfo.frame / summary.fps).toFixed(3)}s</span>
+                                <span className="font-mono text-[10px] truncate max-w-[160px]">{fInfo.filename}</span>
+                              </div>
+                            </Card>
+                          ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
               )}
             </CardContent>
           </Card>
         </TabsContent>
 
-        {/* Charts Tab */}
-        <TabsContent value="charts" className="space-y-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>Difference Score by Frame</CardTitle>
-              <CardDescription>
-                Tampering confidence scores for each detected frame
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {confidenceData.length === 0 ? (
-                <p className="text-sm text-muted-foreground py-8 text-center">No frame data to chart.</p>
-              ) : (
-                <ResponsiveContainer width="100%" height={300}>
-                  <LineChart data={confidenceData}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="frame" />
-                    <YAxis />
-                    <Tooltip />
-                    <Legend />
-                    <Line
-                      type="monotone"
-                      dataKey="confidence"
-                      stroke="#3b82f6"
-                      strokeWidth={2}
-                      dot={{ r: 4 }}
-                    />
-                  </LineChart>
-                </ResponsiveContainer>
-              )}
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Anomaly Type Distribution</CardTitle>
-              <CardDescription>
-                Breakdown of detected anomaly types
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <ResponsiveContainer width="100%" height={300}>
-                <BarChart data={anomalyDistribution}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="type" />
-                  <YAxis />
-                  <Tooltip />
-                  <Legend />
-                  <Bar dataKey="count" fill="#ef4444" />
-                </BarChart>
-              </ResponsiveContainer>
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        {/* Details Tab */}
+        {/* Technical Details Tab */}
         <TabsContent value="details" className="space-y-4">
           <Card>
             <CardHeader>
-              <CardTitle>Technical Details</CardTitle>
+              <CardTitle>Technical Parameters & Model Card</CardTitle>
               <CardDescription>
-                Advanced analysis parameters and methodology
+                Metadata from the active AI detection engine and database record
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
               <div>
-                <h3 className="font-medium mb-3">Analysis Methodology</h3>
+                <h3 className="font-medium mb-3">Model Specifications</h3>
                 <div className="grid md:grid-cols-2 gap-4 text-sm">
                   <div className="space-y-2">
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Algorithm:</span>
-                      <span className="font-medium">Computer Vision CNN</span>
+                    <div className="flex justify-between border-b pb-1">
+                      <span className="text-muted-foreground">Detection Model:</span>
+                      <span className="font-semibold">{summary.model_name || "VideoEditDetect v3"}</span>
                     </div>
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Frame Rate:</span>
-                      <span className="font-medium">30 FPS</span>
+                    <div className="flex justify-between border-b pb-1">
+                      <span className="text-muted-foreground">Model Version:</span>
+                      <span className="font-mono font-medium">{summary.model_version || "3.0.0"}</span>
                     </div>
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Resolution:</span>
-                      <span className="font-medium">1920x1080</span>
+                    <div className="flex justify-between border-b pb-1">
+                      <span className="text-muted-foreground">Architecture:</span>
+                      <span className="font-medium">Two-Stage (RF Cut + Decision Cascade + FD)</span>
+                    </div>
+                    <div className="flex justify-between border-b pb-1">
+                      <span className="text-muted-foreground">Feature Dimensions:</span>
+                      <span className="font-medium">837 (27 features × 31 temporal window)</span>
                     </div>
                   </div>
                   <div className="space-y-2">
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Detection Model:</span>
-                      <span className="font-medium">DeepFake v3.2</span>
+                    <div className="flex justify-between border-b pb-1">
+                      <span className="text-muted-foreground">Frame Rate:</span>
+                      <span className="font-medium">{summary.fps} FPS</span>
                     </div>
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Threshold:</span>
-                      <span className="font-medium">65%</span>
+                    <div className="flex justify-between border-b pb-1">
+                      <span className="text-muted-foreground">Total Analyzed:</span>
+                      <span className="font-medium">{summary.total_frames} frames</span>
                     </div>
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Storage:</span>
-                      <span className="font-medium">MySQL (Node.js API)</span>
+                    <div className="flex justify-between border-b pb-1">
+                      <span className="text-muted-foreground">Operating Cut Threshold:</span>
+                      <span className="font-mono">0.35</span>
+                    </div>
+                    <div className="flex justify-between border-b pb-1">
+                      <span className="text-muted-foreground">Operating FD Threshold:</span>
+                      <span className="font-mono">0.20</span>
                     </div>
                   </div>
+                </div>
+
+                <div className="mt-3 p-2.5 rounded-md bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-center gap-2">
+                  <Info className="size-4 text-amber-600 flex-shrink-0" />
+                  <span>Model trained on synthetic test clips</span>
                 </div>
               </div>
 
               <Separator />
 
               <div>
-                <h3 className="font-medium mb-3">Detection Techniques Applied</h3>
-                <div className="space-y-3">
+                <h3 className="font-medium mb-3">Pipeline Features Extracted</h3>
+                <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-3 text-xs">
                   {[
-                    { name: "Pixel Difference Analysis", status: "Applied" },
-                    { name: "Color Histogram Comparison", status: "Applied" },
-                    { name: "Edge Detection", status: "Applied" },
-                    { name: "Compression Artifact Detection", status: "Applied" },
-                    { name: "Temporal Consistency Check", status: "Applied" },
-                  ].map((technique) => (
-                    <div key={technique.name} className="flex items-center justify-between">
-                      <span className="text-sm">{technique.name}</span>
-                      <Badge variant="secondary" className="text-xs">
-                        {technique.status}
-                      </Badge>
+                    "HSV Histogram Distance",
+                    "Structural Similarity (SSIM)",
+                    "Mean Absolute Pixel Difference",
+                    "Sobel Edge Magnitude Difference",
+                    "DCT Perceptual Hash (pHash)",
+                    "Farnebäck Optical Flow",
+                    "Rolling Median Context (k=5)",
+                    "Per-Video Robust Normalization",
+                    "Long-Context Step Features (w=15)",
+                    "pHash Self-Similarity & Lag Run",
+                    "Junction Peak Snapping (±2 pairs)",
+                    "Temporal Rule-Based Cascade",
+                  ].map((feat) => (
+                    <div key={feat} className="flex items-center gap-2 bg-slate-50 border p-2 rounded">
+                      <CheckCircle className="size-3.5 text-blue-600 flex-shrink-0" />
+                      <span className="font-medium text-slate-800">{feat}</span>
                     </div>
                   ))}
                 </div>

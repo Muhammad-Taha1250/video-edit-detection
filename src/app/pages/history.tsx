@@ -22,9 +22,21 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "../components/ui/alert-dialog";
-import { FileVideo, Search, Trash2, Eye, Calendar, AlertTriangle, CheckCircle, Upload, Loader2 } from "lucide-react";
+import {
+  FileVideo,
+  Search,
+  Trash2,
+  Eye,
+  Calendar,
+  AlertTriangle,
+  CheckCircle,
+  Upload,
+  Loader2,
+  Clock,
+  AlertCircle,
+} from "lucide-react";
 import { toast } from "sonner";
-import { fetchVideos, deleteVideo, fetchStats, VideoRecord, Stats } from "../lib/api";
+import { listVideos, deleteVideo, fetchStats, VideoRecord, Stats } from "../lib/api";
 
 export function HistoryPage() {
   const [analyses, setAnalyses] = useState<VideoRecord[]>([]);
@@ -42,7 +54,7 @@ export function HistoryPage() {
     setLoading(true);
     setError(false);
     try {
-      const [videos, statsData] = await Promise.all([fetchVideos(), fetchStats()]);
+      const [videos, statsData] = await Promise.all([listVideos(), fetchStats()]);
       setAnalyses(videos);
       setStats(statsData);
     } catch (err) {
@@ -72,8 +84,9 @@ export function HistoryPage() {
     const edits = analysis.edits_detected || 0;
     const matchesFilter =
       filterStatus === "all" ||
-      (filterStatus === "suspicious" && edits > 5) ||
-      (filterStatus === "clean" && edits <= 5);
+      (filterStatus === "suspicious" && edits > 0) ||
+      (filterStatus === "clean" && edits === 0) ||
+      (filterStatus === "processing" && analysis.status === "processing");
 
     return matchesSearch && matchesFilter;
   });
@@ -84,6 +97,50 @@ export function HistoryPage() {
     const sizes = ["Bytes", "KB", "MB", "GB"];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + " " + sizes[i];
+  };
+
+  const renderStatusBadge = (analysis: VideoRecord) => {
+    const st = analysis.status;
+    if (st === "processing") {
+      return (
+        <Badge variant="outline" className="text-blue-600 border-blue-300 bg-blue-50 flex items-center gap-1">
+          <Loader2 className="size-3 animate-spin" />
+          Processing ({analysis.progress || 0}%)
+        </Badge>
+      );
+    }
+    if (st === "pending") {
+      return (
+        <Badge variant="secondary" className="text-slate-600">
+          Queued
+        </Badge>
+      );
+    }
+    if (st === "failed") {
+      return (
+        <Badge variant="destructive" className="flex items-center gap-1">
+          <AlertCircle className="size-3" />
+          Failed
+        </Badge>
+      );
+    }
+
+    const edits = analysis.edits_detected || 0;
+    if (edits > 0) {
+      return (
+        <Badge variant="destructive" className="flex items-center gap-1">
+          <AlertTriangle className="size-3" />
+          {edits} {edits === 1 ? "Edit" : "Edits"} Detected
+        </Badge>
+      );
+    }
+
+    return (
+      <Badge className="bg-green-600 hover:bg-green-700 text-white flex items-center gap-1">
+        <CheckCircle className="size-3" />
+        No edits detected
+      </Badge>
+    );
   };
 
   if (loading) {
@@ -116,7 +173,7 @@ export function HistoryPage() {
         <Card className="border-amber-300 bg-amber-50">
           <CardContent className="py-4 text-sm text-amber-800">
             Could not reach the API server at <code>http://localhost:4000</code>.
-            Make sure you ran <code>npm start</code> inside the <code>server</code> folder.
+            Make sure the Express server is running.
           </CardContent>
         </Card>
       )}
@@ -132,7 +189,7 @@ export function HistoryPage() {
           <CardContent>
             <div className="flex items-center gap-2">
               <FileVideo className="size-5 text-blue-600" />
-              <span className="text-2xl font-bold">{stats.total || 0}</span>
+              <span className="text-2xl font-bold">{analyses.length || stats.total || 0}</span>
             </div>
           </CardContent>
         </Card>
@@ -140,13 +197,15 @@ export function HistoryPage() {
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-sm font-medium text-muted-foreground">
-              Suspicious Videos
+              Edited Videos
             </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="flex items-center gap-2">
               <AlertTriangle className="size-5 text-red-600" />
-              <span className="text-2xl font-bold text-red-600">{stats.suspicious || 0}</span>
+              <span className="text-2xl font-bold text-red-600">
+                {analyses.filter((a) => (a.edits_detected || 0) > 0).length}
+              </span>
             </div>
           </CardContent>
         </Card>
@@ -154,13 +213,15 @@ export function HistoryPage() {
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-sm font-medium text-muted-foreground">
-              Clean Videos
+              No Edits Detected
             </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="flex items-center gap-2">
               <CheckCircle className="size-5 text-green-600" />
-              <span className="text-2xl font-bold text-green-600">{stats.clean || 0}</span>
+              <span className="text-2xl font-bold text-green-600">
+                {analyses.filter((a) => a.status === "completed" && (a.edits_detected || 0) === 0).length}
+              </span>
             </div>
           </CardContent>
         </Card>
@@ -189,8 +250,9 @@ export function HistoryPage() {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All Videos</SelectItem>
-                <SelectItem value="suspicious">Suspicious Only</SelectItem>
-                <SelectItem value="clean">Clean Only</SelectItem>
+                <SelectItem value="suspicious">Edited Only</SelectItem>
+                <SelectItem value="clean">No Edits Detected</SelectItem>
+                <SelectItem value="processing">In Progress</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -233,8 +295,8 @@ export function HistoryPage() {
                 <CardContent className="p-6">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-4 flex-1">
-                      <div className="w-20 h-16 bg-slate-200 rounded flex items-center justify-center flex-shrink-0">
-                        <FileVideo className="size-8 text-slate-400" />
+                      <div className="w-20 h-16 bg-slate-100 rounded flex items-center justify-center flex-shrink-0 border">
+                        <FileVideo className="size-8 text-blue-600" />
                       </div>
 
                       <div className="flex-1 space-y-2">
@@ -248,27 +310,35 @@ export function HistoryPage() {
                               </div>
                               <span>•</span>
                               <span>{formatFileSize(analysis.file_size)}</span>
-                              <span>•</span>
-                              <span>{analysis.total_frames || 0} frames</span>
+                              {analysis.total_frames ? (
+                                <>
+                                  <span>•</span>
+                                  <span>{analysis.total_frames} frames</span>
+                                </>
+                              ) : null}
+                              {analysis.duration ? (
+                                <>
+                                  <span>•</span>
+                                  <span className="flex items-center gap-0.5">
+                                    <Clock className="size-3" />
+                                    {analysis.duration}s
+                                  </span>
+                                </>
+                              ) : null}
                             </div>
                           </div>
                         </div>
 
                         <div className="flex items-center gap-4">
-                          <Badge variant={edits > 5 ? "destructive" : "secondary"}>
-                            {edits > 5 ? "Suspicious" : "Clean"}
-                          </Badge>
-                          {edits > 0 && (
-                            <div className="flex items-center gap-1 text-sm">
-                              <AlertTriangle className="size-4 text-red-600" />
-                              <span className="text-red-600 font-medium">
-                                {edits} tampered frames
-                              </span>
-                            </div>
-                          )}
-                          {analysis.confidence_score != null && (
-                            <span className="text-sm text-muted-foreground">
+                          {renderStatusBadge(analysis)}
+                          {analysis.confidence_score != null && analysis.status === "completed" && (
+                            <span className="text-sm text-muted-foreground font-mono">
                               {analysis.confidence_score.toFixed(1)}% confidence
+                            </span>
+                          )}
+                          {analysis.status === "failed" && analysis.error_message && (
+                            <span className="text-xs text-red-600 truncate max-w-sm">
+                              {analysis.error_message}
                             </span>
                           )}
                         </div>
@@ -276,12 +346,14 @@ export function HistoryPage() {
                     </div>
 
                     <div className="flex items-center gap-2 ml-4">
-                      <Button asChild variant="default">
-                        <Link to={`/analysis/${analysis.video_id}`}>
-                          <Eye className="size-4 mr-2" />
-                          View Results
-                        </Link>
-                      </Button>
+                      {analysis.status === "completed" && (
+                        <Button asChild variant="default">
+                          <Link to={`/analysis/${analysis.video_id}`}>
+                            <Eye className="size-4 mr-2" />
+                            View Results
+                          </Link>
+                        </Button>
+                      )}
 
                       <AlertDialog>
                         <AlertDialogTrigger asChild>
@@ -293,7 +365,7 @@ export function HistoryPage() {
                           <AlertDialogHeader>
                             <AlertDialogTitle>Delete Analysis?</AlertDialogTitle>
                             <AlertDialogDescription>
-                              This will permanently delete the analysis for "{analysis.filename}".
+                              This will permanently delete the analysis and stored files for "{analysis.filename}".
                               This action cannot be undone.
                             </AlertDialogDescription>
                           </AlertDialogHeader>
