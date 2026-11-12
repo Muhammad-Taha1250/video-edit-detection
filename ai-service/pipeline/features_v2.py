@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -219,19 +220,174 @@ def _self_similarity(frame_hashes: list[int]) -> tuple[np.ndarray, np.ndarray, n
     return min_dists, best_lags, lag_runs
 
 
+# ─────────────────────────── Parallel Chunk Worker (Spawn-Safe) ──────────────────────
+
+def _calc_hsv_hist_single(frame: np.ndarray) -> np.ndarray:
+    """Computes normalized 3D HSV histogram once for a frame."""
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    h = cv2.calcHist([hsv], [0, 1, 2], None, [16, 8, 8], [0, 180, 0, 256, 0, 256]).astype(np.float32)
+    s = h.sum()
+    return h / s if s > 0 else h
+
+
+def _dct_phash_uint64_from_gray(gray: np.ndarray, size: int = 32) -> int:
+    """Computes uint64 pHash directly from a precomputed grayscale image."""
+    img = cv2.resize(gray, (size, size), interpolation=cv2.INTER_AREA).astype(np.float32)
+    dct = cv2.dct(img)
+    top = dct[:8, :8].flatten()
+    mean = (top.sum() - top[0]) / 63.0
+    bits = (top[1:] > mean)
+    val = 0
+    for bit in bits:
+        val = (val << 1) | int(bit)
+    return val
+
+
+def _process_frame_chunk_worker(chunk_frames: list[np.ndarray]) -> tuple[np.ndarray, list[int]]:
+    """
+    Top-level spawn-safe worker for processing a contiguous chunk of frames.
+    Precomputes grayscale, HSV histograms, Canny edges, pHash, and ORB descriptors once
+    per frame and reuses them across consecutive pairs.
+    """
+    cv2.setNumThreads(1)
+    m = len(chunk_frames)
+    if m < 2:
+        return np.zeros((0, 7), dtype=np.float32), []
+
+    n_pairs = m - 1
+
+    # 1. Precompute per-frame representations once (reused across pair transitions)
+    grays = [cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) for f in chunk_frames]
+    frames_f32 = [f.astype(np.float32) for f in chunk_frames]
+    hsv_hists = [_calc_hsv_hist_single(f) for f in chunk_frames]
+    edges = [cv2.Canny(g, 50, 150).astype(np.float32) for g in grays]
+    phashes = [_dct_phash_uint64_from_gray(g) for g in grays]
+
+    orb = cv2.ORB_create(nfeatures=200)
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    orb_data = [orb.detectAndCompute(g, None) for g in grays]
+
+    min_dim = min(grays[0].shape)
+    win = min(7, min_dim if min_dim % 2 == 1 else min_dim - 1)
+    win = max(win, 3)
+
+    raw_feats = np.zeros((n_pairs, 7), dtype=np.float32)
+
+    for i in range(n_pairs):
+        # 0: HSV histogram diff
+        raw_feats[i, 0] = float(np.sum(np.abs(hsv_hists[i] - hsv_hists[i + 1])))
+
+        # 1: SSIM distance
+        val = _ssim(grays[i], grays[i + 1], win_size=win, data_range=255)
+        raw_feats[i, 1] = float(1.0 - val)
+
+        # 2: Pixel MAD
+        raw_feats[i, 2] = float(np.mean(np.abs(frames_f32[i] - frames_f32[i + 1])))
+
+        # 3: Edge diff
+        raw_feats[i, 3] = float(np.mean(np.abs(edges[i] - edges[i + 1])))
+
+        # 4: pHash distance
+        raw_feats[i, 4] = float(int(phashes[i] ^ phashes[i + 1]).bit_count())
+
+        # 5: Optical flow (Farneback)
+        flow = cv2.calcOpticalFlowFarneback(
+            grays[i], grays[i + 1], None, pyr_scale=0.5, levels=3, winsize=15,
+            iterations=3, poly_n=5, poly_sigma=1.1, flags=0
+        )
+        mag = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2)
+        raw_feats[i, 5] = float(mag.mean())
+
+        # 6: ORB ratio
+        kpa, da = orb_data[i]
+        kpb, db = orb_data[i + 1]
+        if da is None or db is None or len(da) < 2 or len(db) < 2:
+            raw_feats[i, 6] = 0.0
+        else:
+            matches = bf.match(da, db)
+            total = max(len(kpa), len(kpb))
+            raw_feats[i, 6] = float(len(matches) / total) if total > 0 else 0.0
+
+    return raw_feats, phashes
+
+
+def compute_features_from_frames(
+    frames: list[np.ndarray],
+    n_workers: Optional[int] = None,
+) -> np.ndarray:
+    """Computes the 27 temporal features from an in-memory list of frames (scaled to <= 320)."""
+    n_frames = len(frames)
+    if n_frames < 2:
+        return np.zeros((0, N_FEAT_V2), dtype=np.float32)
+
+    n_pairs = n_frames - 1
+    if n_workers is None:
+        cpu_cnt = os.cpu_count() or 4
+        n_workers = min(6, cpu_cnt)
+
+    if n_pairs <= 16 or n_workers <= 1:
+        raw_feats, frame_hashes = _process_frame_chunk_worker(frames)
+    else:
+        n_chunks = min(n_workers, n_pairs)
+        chunk_size_pairs = int(np.ceil(n_pairs / n_chunks))
+        chunks = []
+        for c in range(n_chunks):
+            start_p = c * chunk_size_pairs
+            end_p = min(n_pairs, (c + 1) * chunk_size_pairs)
+            if start_p >= end_p:
+                break
+            chunks.append(frames[start_p : end_p + 1])
+
+        with ProcessPoolExecutor(max_workers=len(chunks)) as executor:
+            chunk_results = list(executor.map(_process_frame_chunk_worker, chunks))
+
+        raw_feats_list = []
+        frame_hashes = []
+        for c_idx, (r_feats, p_hashes) in enumerate(chunk_results):
+            raw_feats_list.append(r_feats)
+            if c_idx == 0:
+                frame_hashes.extend(p_hashes)
+            else:
+                frame_hashes.extend(p_hashes[1:])
+
+        raw_feats = np.vstack(raw_feats_list).astype(np.float32)
+
+    ctx_feats = np.zeros_like(raw_feats)
+    for col in range(7):
+        ctx_feats[:, col] = _rolling_median_context(raw_feats[:, col])
+
+    rob_feats = np.zeros_like(raw_feats)
+    for col in range(7):
+        rob_feats[:, col] = _robust_norm(raw_feats[:, col])
+
+    step_flow = _long_step_feature(raw_feats[:, 5], w=15)
+    step_mad = _long_step_feature(raw_feats[:, 2], w=15)
+    step_phash = _long_step_feature(raw_feats[:, 4], w=15)
+    step_feats = np.column_stack([step_flow, step_mad, step_phash]).astype(np.float32)
+
+    min_dists, best_lags, lag_runs = _self_similarity(frame_hashes)
+    self_feats = np.column_stack([min_dists, best_lags, lag_runs]).astype(np.float32)
+
+    return np.concatenate([raw_feats, ctx_feats, rob_feats, step_feats, self_feats], axis=1).astype(np.float32)
+
+
 def extract_features_v2(
     video_path: str | Path,
     force: bool = False,
     desc: Optional[str] = None,
+    cache_dir: Optional[Path] = None,
+    n_workers: Optional[int] = None,
 ) -> np.ndarray:
     """
-    Extracts 27 features per consecutive frame pair.
+    Extracts 27 features per consecutive frame pair using parallel chunk processing.
     Saves and returns (n_pairs, 27).
     """
     video_path = Path(video_path)
     stem = video_path.stem
-    cache_file = CACHE_V2_DIR / f"{stem}.npy"
-    meta_file = CACHE_V2_DIR / f"{stem}_meta.npy"
+    active_cache = Path(cache_dir) if cache_dir is not None else CACHE_V2_DIR
+    active_cache.mkdir(parents=True, exist_ok=True)
+    cache_file = active_cache / f"{stem}.npy"
+    meta_file = active_cache / f"{stem}_meta.npy"
 
     if cache_file.exists() and meta_file.exists() and not force:
         return np.load(cache_file)
@@ -258,45 +414,9 @@ def extract_features_v2(
         return empty
 
     n_pairs = n_frames - 1
-
-    # 1. Compute frame pHashes for all frames
-    frame_hashes = [_dct_phash_uint64(f) for f in frames]
-
-    # 2. Compute 7 raw pairwise features
-    raw_feats = np.zeros((n_pairs, 7), dtype=np.float32)
-    for i in range(n_pairs):
-        a, b = frames[i], frames[i + 1]
-        raw_feats[i, 0] = _hsv_hist_diff(a, b)
-        raw_feats[i, 1] = _ssim_dist(a, b)
-        raw_feats[i, 2] = _pixel_mad(a, b)
-        raw_feats[i, 3] = _edge_diff(a, b)
-        raw_feats[i, 4] = float(int(frame_hashes[i] ^ frame_hashes[i + 1]).bit_count())
-        raw_feats[i, 5] = _flow_mag(a, b)
-        raw_feats[i, 6] = _orb_ratio(a, b)
-
+    out = compute_features_from_frames(frames, n_workers=n_workers)
     del frames
 
-    # 3. Compute 7 context features (k=5 rolling median)
-    ctx_feats = np.zeros_like(raw_feats)
-    for col in range(7):
-        ctx_feats[:, col] = _rolling_median_context(raw_feats[:, col])
-
-    # 4. Compute 7 robust normalized features (per-video median / MAD)
-    rob_feats = np.zeros_like(raw_feats)
-    for col in range(7):
-        rob_feats[:, col] = _robust_norm(raw_feats[:, col])
-
-    # 5. Compute 3 long-context step features (flow_mag, pixel_mad, phash_dist)
-    step_flow = _long_step_feature(raw_feats[:, 5], w=15)
-    step_mad = _long_step_feature(raw_feats[:, 2], w=15)
-    step_phash = _long_step_feature(raw_feats[:, 4], w=15)
-    step_feats = np.column_stack([step_flow, step_mad, step_phash]).astype(np.float32)
-
-    # 6. Compute 3 self-similarity features
-    min_dists, best_lags, lag_runs = _self_similarity(frame_hashes)
-    self_feats = np.column_stack([min_dists, best_lags, lag_runs]).astype(np.float32)
-
-    out = np.concatenate([raw_feats, ctx_feats, rob_feats, step_feats, self_feats], axis=1).astype(np.float32)
     np.save(cache_file, out)
     np.save(meta_file, np.array([fps, n_pairs]))
     return out

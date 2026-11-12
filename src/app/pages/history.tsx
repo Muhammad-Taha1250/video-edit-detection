@@ -333,7 +333,7 @@ export function HistoryPage() {
                           {renderStatusBadge(analysis)}
                           {analysis.confidence_score != null && analysis.status === "completed" && (
                             <span className="text-sm text-muted-foreground font-mono">
-                              {analysis.confidence_score.toFixed(1)}% confidence
+                              {analysis.confidence_score.toFixed(1)}% detection score
                             </span>
                           )}
                           {analysis.status === "failed" && analysis.error_message && (

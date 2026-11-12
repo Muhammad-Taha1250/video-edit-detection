@@ -30,6 +30,7 @@ if str(AI_SERVICE) not in sys.path:
 from service.inference import (
     EXTRACTED_FRAMES_DIR,
     analyze_video,
+    get_active_model_info,
     get_models,
 )
 
@@ -77,6 +78,7 @@ def _process_job(job_id: str, video_path: str):
 def health():
     """Health check endpoint confirming service status and model readiness."""
     models_ready = False
+    info = get_active_model_info()
     try:
         get_models()
         models_ready = True
@@ -86,8 +88,10 @@ def health():
     return jsonify({
         "status": "ok",
         "service": "video-edit-detection-ai",
-        "version": "3.0.0",
+        "version": info.get("model_version", "3.0.0"),
         "models_loaded": models_ready,
+        "model_set": info["model_set"],
+        "training_data_description": info["training_data_description"],
     }), 200
 
 
@@ -152,10 +156,14 @@ def analyze():
     )
     worker.start()
 
+    info = get_active_model_info()
+
     return jsonify({
         "job_id": job_id,
         "status": "pending",
         "message": "Analysis started in background.",
+        "model_set": info["model_set"],
+        "training_data_description": info["training_data_description"],
     }), 202
 
 

@@ -33,6 +33,47 @@ import {
 } from "recharts";
 import { getResults, getFrameUrl, AnalysisResultsResponse, EditEvent } from "../lib/api";
 
+function FrameImage({
+  src,
+  alt,
+  className = "w-full h-full object-contain",
+}: {
+  src: string;
+  alt: string;
+  className?: string;
+}) {
+  const [hasError, setHasError] = useState(false);
+
+  useEffect(() => {
+    setHasError(false);
+  }, [src]);
+
+  if (hasError || !src) {
+    return (
+      <div className="w-full h-full min-h-[140px] flex flex-col items-center justify-center p-3 text-center bg-slate-900 border border-slate-800 text-slate-300">
+        <AlertTriangle className="size-5 text-amber-500 mb-1.5 shrink-0" />
+        <span className="text-xs font-semibold text-slate-200">Frame unavailable</span>
+        <span
+          className="text-[10px] text-slate-400 font-mono mt-1 break-all px-2 select-all line-clamp-3"
+          title={src}
+        >
+          {src || "No URL provided"}
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={src}
+      alt={alt}
+      className={className}
+      loading="lazy"
+      onError={() => setHasError(true)}
+    />
+  );
+}
+
 export function AnalysisPage() {
   const { id } = useParams();
   const [data, setData] = useState<AnalysisResultsResponse | null>(null);
@@ -87,6 +128,39 @@ export function AnalysisPage() {
   const editsDetected = summary.edits_detected || events.length || 0;
   const isClean = editsDetected === 0;
 
+  const isEventLowConfidence = (
+    ev?: { confidence?: number; evidence_z?: number } | number,
+    zScore?: number
+  ) => {
+    if (ev === undefined || ev === null) return false;
+    let conf: number;
+    let z: number | undefined;
+    if (typeof ev === "object") {
+      conf = typeof ev.confidence === "number" ? ev.confidence : 1.0;
+      z = typeof ev.evidence_z === "number" ? ev.evidence_z : undefined;
+    } else {
+      conf = ev;
+      z = zScore;
+    }
+
+    if (conf > 1.0) conf = conf / 100.0;
+
+    // Events with evidence_z >= 15 are high confidence
+    if (z !== undefined && z >= 15) {
+      return false;
+    }
+
+    // Call an event "low confidence" only if evidence_z < 15 AND confidence < 0.5
+    if (z !== undefined) {
+      return z < 15 && conf < 0.5;
+    }
+
+    return conf < 0.5;
+  };
+
+  const lowConfidenceEvents = events.filter((ev) => isEventLowConfidence(ev));
+  const hasLowConfidence = lowConfidenceEvents.length > 0;
+
   const downloadReport = () => {
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -97,7 +171,23 @@ export function AnalysisPage() {
     URL.revokeObjectURL(url);
   };
 
-  const formatEditBadge = (type: string) => {
+  const formatEditBadge = (
+    type: string,
+    evOrConf?: { confidence?: number; evidence_z?: number } | number,
+    zScore?: number
+  ) => {
+    const isLow = isEventLowConfidence(evOrConf, zScore);
+    if (isLow) {
+      return (
+        <Badge
+          variant="outline"
+          className="bg-slate-100 text-slate-600 border-slate-300 font-normal hover:bg-slate-200"
+        >
+          Possible {type} (low confidence)
+        </Badge>
+      );
+    }
+
     switch (type.toLowerCase()) {
       case "deletion":
         return <Badge variant="destructive">Deletion Cut</Badge>;
@@ -203,25 +293,35 @@ export function AnalysisPage() {
           <CardHeader className="pb-2">
             <CardTitle className="text-xs font-medium text-muted-foreground">Edits Detected</CardTitle>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-1">
             <div className="flex items-center gap-2">
               <AlertTriangle className={`size-4 ${isClean ? "text-green-600" : "text-red-600"}`} />
               <span className={`text-xl font-bold ${isClean ? "text-green-600" : "text-red-600"}`}>
                 {editsDetected}
               </span>
             </div>
+            {hasLowConfidence && (
+              <p className="text-[11px] text-amber-600 font-medium leading-tight">
+                Low-confidence events need manual review
+              </p>
+            )}
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-xs font-medium text-muted-foreground">Confidence</CardTitle>
+            <CardTitle className="text-xs font-medium text-muted-foreground">Detection score</CardTitle>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-1">
             <div className="flex items-center gap-2">
               <Sparkles className="size-4 text-purple-600" />
               <span className="text-xl font-bold">{(summary.confidence_score || 0).toFixed(1)}%</span>
             </div>
+            {hasLowConfidence && (
+              <p className="text-[11px] text-amber-600 font-medium leading-tight">
+                Low-confidence events need manual review
+              </p>
+            )}
           </CardContent>
         </Card>
 
@@ -238,11 +338,21 @@ export function AnalysisPage() {
       </div>
 
       {/* Note under summary cards */}
-      <div className="flex items-center gap-2 text-xs text-muted-foreground bg-slate-50 border border-slate-200 rounded-md p-2.5">
-        <Info className="size-4 text-slate-500 flex-shrink-0" />
-        <span>
-          Detection covers cuts, insertions, duplicated frames and dropped frames. Not detecting an edit does not guarantee the video is authentic.
-        </span>
+      <div className="space-y-2">
+        {hasLowConfidence && (
+          <div className="flex items-center gap-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md p-2.5">
+            <AlertTriangle className="size-4 text-amber-600 flex-shrink-0" />
+            <span className="font-medium">
+              Note: One or more detected events have a low detection score (evidence &lt; 15x and score &lt; 50%). Low-confidence events need manual review.
+            </span>
+          </div>
+        )}
+        <div className="flex items-center gap-2 text-xs text-muted-foreground bg-slate-50 border border-slate-200 rounded-md p-2.5">
+          <Info className="size-4 text-slate-500 flex-shrink-0" />
+          <span>
+            Detection covers cuts, insertions, duplicated frames and dropped frames. Not detecting an edit does not guarantee the video is authentic.
+          </span>
+        </div>
       </div>
 
       {/* Tabs */}
@@ -286,17 +396,21 @@ export function AnalysisPage() {
                           <th className="py-3 px-4 text-left">Edit Type</th>
                           <th className="py-3 px-4 text-left">Frame Range</th>
                           <th className="py-3 px-4 text-left">Timestamp (sec)</th>
-                          <th className="py-3 px-4 text-left">Confidence</th>
+                          <th className="py-3 px-4 text-left">Detection score</th>
                           <th className="py-3 px-4 text-left">Frames Captured</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y">
                         {events.map((ev, idx) => {
                           const frameCount = ev.extracted_frames ? Object.keys(ev.extracted_frames).length : 0;
+                          const isLow = isEventLowConfidence(ev);
                           return (
-                            <tr key={ev.segment_id || idx} className="hover:bg-slate-50/60">
+                            <tr
+                              key={ev.segment_id || idx}
+                              className={`hover:bg-slate-50/60 ${isLow ? "bg-amber-50/30" : ""}`}
+                            >
                               <td className="py-3 px-4 font-mono font-medium">{idx + 1}</td>
-                              <td className="py-3 px-4">{formatEditBadge(ev.edit_type)}</td>
+                              <td className="py-3 px-4">{formatEditBadge(ev.edit_type, ev)}</td>
                               <td className="py-3 px-4 font-mono">
                                 {ev.start_frame === ev.end_frame
                                   ? `Frame ${ev.start_frame}`
@@ -308,7 +422,19 @@ export function AnalysisPage() {
                                   : `${ev.start_time.toFixed(3)}s – ${ev.end_time.toFixed(3)}s`}
                               </td>
                               <td className="py-3 px-4 font-medium">
-                                {(ev.confidence * 100).toFixed(1)}%
+                                <span className={isLow ? "text-amber-700" : ""}>
+                                  {(ev.confidence * 100).toFixed(1)}%
+                                </span>
+                                {ev.evidence_z != null && (
+                                  <span className="block text-[11px] text-muted-foreground font-normal">
+                                    Change vs normal: {ev.evidence_z.toFixed(1)}x
+                                  </span>
+                                )}
+                                {isLow && (
+                                  <span className="block text-[11px] text-amber-600 font-normal">
+                                    Manual review needed
+                                  </span>
+                                )}
                               </td>
                               <td className="py-3 px-4 text-muted-foreground">
                                 {frameCount > 0 ? (
@@ -344,14 +470,28 @@ export function AnalysisPage() {
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <div className="flex items-center gap-2">
                             <span className="font-semibold text-sm">Event {idx + 1}:</span>
-                            {formatEditBadge(ev.edit_type)}
+                            {formatEditBadge(ev.edit_type, ev)}
                             <span className="text-xs text-muted-foreground font-mono">
                               (Frames {ev.start_frame} → {ev.end_frame} | {ev.start_time.toFixed(3)}s – {ev.end_time.toFixed(3)}s)
                             </span>
                           </div>
-                          <Badge variant="outline" className="text-xs">
-                            Confidence: {(ev.confidence * 100).toFixed(1)}%
-                          </Badge>
+                          <div className="flex items-center gap-2">
+                            {ev.evidence_z != null && (
+                              <Badge variant="outline" className="text-xs border-slate-300 text-slate-700 bg-slate-50">
+                                Change vs normal: {ev.evidence_z.toFixed(1)}x
+                              </Badge>
+                            )}
+                            <Badge
+                              variant="outline"
+                              className={`text-xs ${
+                                isEventLowConfidence(ev)
+                                  ? "border-amber-300 text-amber-700 bg-amber-50"
+                                  : ""
+                              }`}
+                            >
+                              Detection score: {(ev.confidence * 100).toFixed(1)}%
+                            </Badge>
+                          </div>
                         </div>
                       </CardHeader>
                       <CardContent className="p-4">
@@ -370,11 +510,10 @@ export function AnalysisPage() {
                                   </span>
                                 </div>
                                 <div className="aspect-video bg-black flex items-center justify-center overflow-hidden">
-                                  <img
-                                    src={getFrameUrl(fInfo.url)}
+                                  <FrameImage
+                                    src={getFrameUrl(fInfo.url, summary.video_id)}
                                     alt={`${role} frame ${fInfo.frame}`}
                                     className="w-full h-full object-contain"
-                                    loading="lazy"
                                   />
                                 </div>
                                 <div className="p-1.5 bg-slate-800/80 text-[11px] text-slate-300 flex justify-between">
@@ -483,7 +622,8 @@ export function AnalysisPage() {
                   {events.map((ev, evIdx) => (
                     <div key={evIdx} className="space-y-3">
                       <div className="flex items-center gap-2">
-                        <span className="font-semibold text-sm">Event {evIdx + 1} ({ev.edit_type}):</span>
+                        <span className="font-semibold text-sm">Event {evIdx + 1}:</span>
+                        {formatEditBadge(ev.edit_type, ev)}
                         <span className="text-xs text-muted-foreground font-mono">
                           Frames {ev.start_frame} → {ev.end_frame}
                         </span>
@@ -498,12 +638,11 @@ export function AnalysisPage() {
                                   Frame {fInfo.frame}
                                 </Badge>
                               </div>
-                              <div className="aspect-video bg-black flex items-center justify-center">
-                                <img
-                                  src={getFrameUrl(fInfo.url)}
+                              <div className="aspect-video bg-black flex items-center justify-center overflow-hidden">
+                                <FrameImage
+                                  src={getFrameUrl(fInfo.url, summary.video_id)}
                                   alt={fInfo.filename}
                                   className="w-full h-full object-contain"
-                                  loading="lazy"
                                 />
                               </div>
                               <div className="p-2 text-xs text-muted-foreground flex justify-between">
@@ -548,6 +687,12 @@ export function AnalysisPage() {
                       <span className="font-medium">Two-Stage (RF Cut + Decision Cascade + FD)</span>
                     </div>
                     <div className="flex justify-between border-b pb-1">
+                      <span className="text-muted-foreground">Training Data:</span>
+                      <span className="font-medium text-right max-w-[260px] truncate" title={summary.training_data_description || data.training_data_description || "synthetic smoke-test clips"}>
+                        {summary.training_data_description || data.training_data_description || "synthetic smoke-test clips"}
+                      </span>
+                    </div>
+                    <div className="flex justify-between border-b pb-1">
                       <span className="text-muted-foreground">Feature Dimensions:</span>
                       <span className="font-medium">837 (27 features × 31 temporal window)</span>
                     </div>
@@ -572,10 +717,33 @@ export function AnalysisPage() {
                   </div>
                 </div>
 
-                <div className="mt-3 p-2.5 rounded-md bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-center gap-2">
-                  <Info className="size-4 text-amber-600 flex-shrink-0" />
-                  <span>Model trained on synthetic test clips</span>
-                </div>
+                {(() => {
+                  const trainingDesc =
+                    summary.training_data_description ||
+                    data.training_data_description ||
+                    "synthetic test clips";
+                  const isReal = trainingDesc.toLowerCase().includes("real");
+                  return (
+                    <div
+                      className={`mt-3 p-2.5 rounded-md text-xs flex items-center gap-2 ${
+                        isReal
+                          ? "bg-emerald-50 border border-emerald-200 text-emerald-800"
+                          : "bg-amber-50 border border-amber-200 text-amber-800"
+                      }`}
+                    >
+                      <Info
+                        className={`size-4 flex-shrink-0 ${
+                          isReal ? "text-emerald-600" : "text-amber-600"
+                        }`}
+                      />
+                      <span>
+                        {trainingDesc.toLowerCase().startsWith("model trained on")
+                          ? trainingDesc
+                          : `Model trained on ${trainingDesc}`}
+                      </span>
+                    </div>
+                  );
+                })()}
               </div>
 
               <Separator />

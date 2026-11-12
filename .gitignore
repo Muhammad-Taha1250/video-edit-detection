@@ -20,3 +20,4 @@ dist/
 ai-service/models/*.csv
 ai-service/models/*.joblib
 ai-service/models/*.pt
+logs/

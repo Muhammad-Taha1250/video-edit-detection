@@ -435,42 +435,20 @@ def op_frame_drop(
 
 # ─────────────────────────── Main Entry Point ────────────────────────
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Generate a labelled dataset for video-edit detection.",
-    )
-    parser.add_argument(
-        "--sources",
-        type=Path,
-        default=SOURCES_DIR,
-        help="Folder containing source videos (default: sources/)",
-    )
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=OUTPUT_DIR,
-        help="Where to write generated videos (default: generated/)",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed for reproducibility",
-    )
-    parser.add_argument(
-        "--rounds",
-        type=int,
-        default=1,
-        help="Number of randomized passes over each source video (default: 1)",
-    )
-    args = parser.parse_args()
-
+def generate_dataset(
+    src_dir: Path | str = SOURCES_DIR,
+    out_dir: Path | str = OUTPUT_DIR,
+    labels_csv: Path | str = LABELS_CSV,
+    rounds: int = 1,
+    seed: int = 42,
+) -> list[dict]:
     # Enforce FFmpeg installation upfront
     check_ffmpeg()
 
-    src_dir = args.sources
-    out_dir = args.output
-    rounds  = max(1, args.rounds)
+    src_dir = Path(src_dir)
+    out_dir = Path(out_dir)
+    labels_csv = Path(labels_csv)
+    rounds  = max(1, rounds)
 
     # ── Discover source videos ───────────────────────────────────
     if not src_dir.exists():
@@ -491,6 +469,7 @@ def main() -> None:
         )
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    labels_csv.parent.mkdir(parents=True, exist_ok=True)
 
     # ── Read metadata ONLY (do NOT keep frames in memory) ─────────
     print(f"\n{'=' * 55}")
@@ -498,7 +477,7 @@ def main() -> None:
     print(f"{'=' * 55}")
     print(f"\n📂  Source folder : {src_dir}/")
     print(f"📂  Output folder : {out_dir}/")
-    print(f"🎲  Base seed     : {args.seed}")
+    print(f"🎲  Base seed     : {seed}")
     print(f"🔁  Rounds/source : {rounds}")
     print(f"📐  Resolution    : per-source, aspect-preserved, long side = {MAX_LONG_SIDE}")
     print(f"\nScanning {len(vids)} source video metadata …\n")
@@ -539,7 +518,7 @@ def main() -> None:
 
     for round_idx in range(1, rounds + 1):
         # Deterministic, distinct seed derived per round
-        round_seed = args.seed + round_idx
+        round_seed = seed + round_idx
         random.seed(round_seed)
         np.random.seed(round_seed)
 
@@ -679,7 +658,7 @@ def main() -> None:
         "quality_crf",
         "extra_generations",
     ]
-    with open(LABELS_CSV, "w", newline="") as fh:
+    with open(labels_csv, "w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(labels)
@@ -698,7 +677,7 @@ def main() -> None:
     print(f"  Source videos used       : {len(all_sources)}")
     print(f"  Videos generated         : {len(labels)}")
     print(f"  2-generation re-encoded  : {extra_gen_count} ({extra_gen_count/max(1, len(labels))*100:.1f}%)")
-    print(f"  Labels written to        : {LABELS_CSV}")
+    print(f"  Labels written to        : {labels_csv}")
     print(f"\n  Class breakdown:")
     print(f"  {'─' * 50}")
     for cls in sorted(op_counts):
@@ -709,21 +688,52 @@ def main() -> None:
     print(f"    {'TOTAL':40s}  {len(labels)}")
     print(f"{'=' * 55}\n")
 
-    print(f"\n{'=' * 55}")
-    print(f"  ✅  Dataset generation complete!")
-    print(f"{'=' * 55}")
-    print(f"  Source videos used : {len(all_sources)}")
-    print(f"  Videos generated   : {len(labels)}")
-    print(f"  Labels written to  : {LABELS_CSV}")
-    print(f"\n  Class breakdown:")
-    print(f"  {'─' * 50}")
-    for cls in sorted(op_counts):
-        print(f"    {cls:42s}  {op_counts[cls]}")
-    print(f"  {'─' * 50}")
-    print(f"    {'TOTAL unedited':42s}  {total_unedited}")
-    print(f"    {'TOTAL edited':42s}  {total_edited}")
-    print(f"    {'TOTAL':42s}  {len(labels)}")
-    print(f"{'=' * 55}\n")
+    return labels
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Generate a labelled dataset for video-edit detection.",
+    )
+    parser.add_argument(
+        "--sources",
+        type=Path,
+        default=SOURCES_DIR,
+        help="Folder containing source videos (default: sources/)",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=OUTPUT_DIR,
+        help="Where to write generated videos (default: generated/)",
+    )
+    parser.add_argument(
+        "--labels",
+        type=Path,
+        default=LABELS_CSV,
+        help="Where to write labels CSV (default: labels.csv)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility",
+    )
+    parser.add_argument(
+        "--rounds",
+        type=int,
+        default=1,
+        help="Number of randomized passes over each source video (default: 1)",
+    )
+    args = parser.parse_args()
+
+    generate_dataset(
+        src_dir=args.sources,
+        out_dir=args.output,
+        labels_csv=args.labels,
+        rounds=args.rounds,
+        seed=args.seed,
+    )
 
 
 if __name__ == "__main__":

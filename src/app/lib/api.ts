@@ -9,12 +9,34 @@ export const SERVER_URL = (
 
 export const API_BASE = `${SERVER_URL}/api`;
 
-export function getFrameUrl(urlOrPath: string): string {
+export function getFrameUrl(urlOrPath: string, videoId?: number | string): string {
   if (!urlOrPath) return "";
   if (urlOrPath.startsWith("http://") || urlOrPath.startsWith("https://")) {
     return urlOrPath;
   }
-  const clean = urlOrPath.startsWith("/") ? urlOrPath : `/${urlOrPath}`;
+
+  let clean = urlOrPath.trim();
+  if (!clean.startsWith("/")) {
+    clean = `/${clean}`;
+  }
+
+  // Handle direct Flask paths: /frames/:jobId/:filename or /extracted_frames/:jobId/:filename
+  // and route them through the Express proxy /api/videos/:id/frames/:job/:filename
+  const framesMatch = clean.match(/^\/(?:extracted_)?frames\/([^/]+)\/(.+)$/);
+  if (framesMatch) {
+    const job = framesMatch[1];
+    const file = framesMatch[2];
+    const vId = videoId || job;
+    clean = `/api/videos/${vId}/frames/${job}/${file}`;
+  } else if (!clean.startsWith("/api/")) {
+    if (clean.startsWith("/videos/")) {
+      clean = `/api${clean}`;
+    } else if (videoId) {
+      const filename = clean.replace(/^\//, "");
+      clean = `/api/videos/${videoId}/frames/${videoId}/${filename}`;
+    }
+  }
+
   return `${SERVER_URL}${clean}`;
 }
 
@@ -64,6 +86,7 @@ export interface EditEvent {
   start_time: number;
   end_time: number;
   confidence: number;
+  evidence_z?: number;
   extracted_frames?: Record<string, ExtractedFrameInfo>;
   created_at?: string;
 }
@@ -95,6 +118,8 @@ export interface AnalysisSummary {
   confidence_score: number;
   model_name: string;
   model_version: string;
+  model_set?: string;
+  training_data_description?: string;
   analysis_date: string;
   error?: string | null;
 }
@@ -107,6 +132,8 @@ export interface AnalysisResultsResponse {
   frames: FlattenedFrame[];
   series: ProbabilityPoint[];
   detected_frames: FrameRecord[];
+  model_set?: string;
+  training_data_description?: string;
 }
 
 export interface VideoDetail {

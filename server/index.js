@@ -171,11 +171,20 @@ function pollJobStatus(videoId) {
           .catch(() => {});
       }
     }
-  }, 1000);
+  }, 500);
 }
+
+// Cache for active model metadata passed from Flask analysis results
+const jobModelMeta = new Map();
 
 async function saveCompletedJobResults(videoId, result) {
   if (!result) return;
+  if (result.model_set || result.training_data_description) {
+    jobModelMeta.set(String(videoId), {
+      model_set: result.model_set,
+      training_data_description: result.training_data_description,
+    });
+  }
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
@@ -415,6 +424,45 @@ app.get("/api/videos/:id/results", async (req, res) => {
       }
     });
 
+    // Retrieve model metadata from job cache, Flask /health, or active model card
+    let meta = jobModelMeta.get(String(id));
+    if (!meta || !meta.training_data_description) {
+      try {
+        const healthResp = await axios.get(`${FLASK_URL}/health`, { timeout: 1000 });
+        if (healthResp.data) {
+          meta = {
+            model_set: healthResp.data.model_set,
+            training_data_description: healthResp.data.training_data_description,
+          };
+          jobModelMeta.set(String(id), meta);
+        }
+      } catch (e) {}
+    }
+
+    if (!meta || !meta.training_data_description) {
+      try {
+        const candidates = [
+          path.resolve("ai-service/models/final_real/model_card.json"),
+          path.resolve("../ai-service/models/final_real/model_card.json"),
+          path.resolve("ai-service/models/final_v3/model_card.json"),
+          path.resolve("../ai-service/models/final_v3/model_card.json"),
+        ];
+        for (const p of candidates) {
+          if (fs.existsSync(p)) {
+            const card = JSON.parse(fs.readFileSync(p, "utf8"));
+            meta = {
+              model_set: p.includes("final_real") ? "final_real" : "final_v3",
+              training_data_description: card.training_data_description || card.training_data,
+            };
+            break;
+          }
+        }
+      } catch (e) {}
+    }
+
+    const modelSet = meta?.model_set || "final_v3";
+    const trainingDataDesc = meta?.training_data_description || "synthetic smoke-test clips";
+
     const summary = {
       video_id: video.video_id,
       filename: video.filename,
@@ -426,6 +474,8 @@ app.get("/api/videos/:id/results", async (req, res) => {
       confidence_score: result?.confidence_score ?? 0,
       model_name: result?.model_name || "VideoEditDetect v3",
       model_version: result?.model_version || "3.0.0",
+      model_set: modelSet,
+      training_data_description: trainingDataDesc,
       analysis_date: result?.analysis_date || video.upload_date,
       error: video.error_message,
     };
@@ -438,6 +488,8 @@ app.get("/api/videos/:id/results", async (req, res) => {
       frames,
       series,
       detected_frames: detectedFrames,
+      model_set: modelSet,
+      training_data_description: trainingDataDesc,
     });
   } catch (err) {
     console.error(err);

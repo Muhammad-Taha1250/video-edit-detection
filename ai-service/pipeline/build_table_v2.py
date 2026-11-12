@@ -78,41 +78,54 @@ def _label_pairs_v2(n_pairs: int, row: pd.Series) -> np.ndarray:
     return mask
 
 
-def _extract_worker_v2(path_str: str) -> tuple[str, bool, str]:
+def _extract_worker_v2(args_tuple: tuple[str, Optional[str]]) -> tuple[str, bool, str]:
+    path_str, cache_dir_str = args_tuple
     try:
-        extract_features_v2(Path(path_str))
+        extract_features_v2(
+            Path(path_str),
+            cache_dir=Path(cache_dir_str) if cache_dir_str else None,
+        )
         return (path_str, True, "")
     except Exception as exc:
         return (path_str, False, str(exc))
 
 
-def build_table_v2(force: bool = False) -> pd.DataFrame:
-    out_parquet = MODELS_DIR / "feature_table_v2.parquet"
-    out_csv     = MODELS_DIR / "feature_table_v2.csv"
+def build_table_v2(
+    force: bool = False,
+    generated_dir: Optional[Path] = None,
+    labels_csv: Optional[Path] = None,
+    cache_dir: Optional[Path] = None,
+    out_parquet: Optional[Path] = None,
+    out_csv: Optional[Path] = None,
+) -> pd.DataFrame:
+    gen_dir = Path(generated_dir) if generated_dir is not None else GENERATED_DIR
+    lab_csv = Path(labels_csv) if labels_csv is not None else _find_labels_csv()
+    active_cache = Path(cache_dir) if cache_dir is not None else CACHE_V2_DIR
+    out_pq = Path(out_parquet) if out_parquet is not None else (MODELS_DIR / "feature_table_v2.parquet")
+    out_c  = Path(out_csv) if out_csv is not None else (MODELS_DIR / "feature_table_v2.csv")
 
-    if out_parquet.exists() and not force:
-        print(f"Loading cached v2 table from {out_parquet}")
-        return pd.read_parquet(out_parquet)
-    if out_csv.exists() and not force:
-        print(f"Loading cached v2 table from {out_csv}")
-        return pd.read_csv(out_csv)
+    if out_pq.exists() and not force:
+        print(f"Loading cached v2 table from {out_pq}")
+        return pd.read_parquet(out_pq)
+    if out_c.exists() and not force:
+        print(f"Loading cached v2 table from {out_c}")
+        return pd.read_csv(out_c)
 
-    labels_csv = _find_labels_csv()
-    if not labels_csv.exists():
-        raise FileNotFoundError(f"labels.csv not found at {labels_csv}")
+    if not lab_csv.exists():
+        raise FileNotFoundError(f"labels.csv not found at {lab_csv}")
 
-    df_labels = pd.read_csv(labels_csv)
+    df_labels = pd.read_csv(lab_csv)
 
     unique_videos = [
-        GENERATED_DIR / Path(f).name
+        gen_dir / Path(f).name
         for f in df_labels["output_file"].unique()
-        if (GENERATED_DIR / Path(f).name).exists()
+        if (gen_dir / Path(f).name).exists()
     ]
-    print(f"Found {len(unique_videos)} videos to process in {GENERATED_DIR}")
+    print(f"Found {len(unique_videos)} videos to process in {gen_dir}")
 
     missing = [
         v for v in unique_videos
-        if force or not (CACHE_V2_DIR / f"{v.stem}.npy").exists()
+        if force or not (active_cache / f"{v.stem}.npy").exists()
     ]
 
     if missing:
@@ -120,7 +133,7 @@ def build_table_v2(force: bool = False) -> pd.DataFrame:
         print(f"Extracting Day 3 features v2 for {len(missing)} videos ({n_workers} workers) …")
         with ProcessPoolExecutor(max_workers=n_workers) as executor:
             futures = {
-                executor.submit(_extract_worker_v2, str(v)): v
+                executor.submit(_extract_worker_v2, (str(v), str(active_cache))): v
                 for v in missing
             }
             for fut in tqdm(as_completed(futures), total=len(futures), desc="Features v2"):
@@ -133,12 +146,12 @@ def build_table_v2(force: bool = False) -> pd.DataFrame:
     # Assemble table
     rows: list[dict] = []
     for video_file, grp in tqdm(df_labels.groupby("output_file"), desc="Assembling table v2"):
-        video_path = GENERATED_DIR / Path(video_file).name
+        video_path = gen_dir / Path(video_file).name
         if not video_path.exists():
             continue
 
         try:
-            feats = extract_features_v2(video_path)
+            feats = extract_features_v2(video_path, cache_dir=active_cache)
         except Exception as exc:
             print(f"  ⚠ Cannot load features for {video_path.name}: {exc}")
             continue
@@ -169,11 +182,11 @@ def build_table_v2(force: bool = False) -> pd.DataFrame:
     table = pd.DataFrame(rows)
 
     try:
-        table.to_parquet(out_parquet, index=False)
-        print(f"\n✓ Feature table v2 saved → {out_parquet} ({len(table):,} rows)")
+        table.to_parquet(out_pq, index=False)
+        print(f"\n✓ Feature table saved → {out_pq} ({len(table):,} rows)")
     except Exception:
-        table.to_csv(out_csv, index=False)
-        print(f"\n✓ Feature table v2 saved → {out_csv} ({len(table):,} rows)")
+        table.to_csv(out_c, index=False)
+        print(f"\n✓ Feature table saved → {out_c} ({len(table):,} rows)")
 
     dist = table["label"].value_counts()
     print("\nLabel distribution (v2 boundary labeling):")
