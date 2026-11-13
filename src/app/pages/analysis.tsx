@@ -129,33 +129,53 @@ export function AnalysisPage() {
   const isClean = editsDetected === 0;
 
   const isEventLowConfidence = (
-    ev?: { confidence?: number; evidence_z?: number } | number,
-    zScore?: number
+    ev?: { confidence?: number; evidence_z?: number | null } | number,
+    zScore?: number | null
   ) => {
     if (ev === undefined || ev === null) return false;
     let conf: number;
-    let z: number | undefined;
+    let z: number | null = null;
     if (typeof ev === "object") {
       conf = typeof ev.confidence === "number" ? ev.confidence : 1.0;
-      z = typeof ev.evidence_z === "number" ? ev.evidence_z : undefined;
+      z = ev.evidence_z !== undefined && ev.evidence_z !== null ? Number(ev.evidence_z) : null;
     } else {
-      conf = ev;
-      z = zScore;
+      conf = typeof ev === "number" ? ev : 1.0;
+      z = zScore !== undefined && zScore !== null ? Number(zScore) : null;
     }
 
     if (conf > 1.0) conf = conf / 100.0;
 
     // Events with evidence_z >= 15 are high confidence
-    if (z !== undefined && z >= 15) {
+    if (z !== null && z >= 15) {
       return false;
     }
 
     // Call an event "low confidence" only if evidence_z < 15 AND confidence < 0.5
-    if (z !== undefined) {
+    if (z !== null) {
       return z < 15 && conf < 0.5;
     }
 
-    return conf < 0.5;
+    // Old videos without evidence_z must not be flagged low confidence just because the value is missing
+    return false;
+  };
+
+  const getFriendlyName = (type?: string): string => {
+    if (!type) return "Edit";
+    switch (type.toLowerCase()) {
+      case "scene_cut":
+        return "Scene cut / splice";
+      case "deletion":
+        return "Deletion (same-scene cut)";
+      case "insertion":
+        return "Segment insertion";
+      case "duplication":
+        return "Frame duplication";
+      case "frame_drop":
+      case "framedrop":
+        return "Dropped frames";
+      default:
+        return type;
+    }
   };
 
   const lowConfidenceEvents = events.filter((ev) => isEventLowConfidence(ev));
@@ -177,28 +197,32 @@ export function AnalysisPage() {
     zScore?: number
   ) => {
     const isLow = isEventLowConfidence(evOrConf, zScore);
+    const friendly = getFriendlyName(type);
     if (isLow) {
       return (
         <Badge
           variant="outline"
           className="bg-slate-100 text-slate-600 border-slate-300 font-normal hover:bg-slate-200"
         >
-          Possible {type} (low confidence)
+          Possible {friendly} (low confidence)
         </Badge>
       );
     }
 
     switch (type.toLowerCase()) {
       case "deletion":
-        return <Badge variant="destructive">Deletion Cut</Badge>;
+        return <Badge variant="destructive">{friendly}</Badge>;
       case "insertion":
-        return <Badge className="bg-blue-600 hover:bg-blue-700">Segment Insertion</Badge>;
+        return <Badge className="bg-blue-600 hover:bg-blue-700">{friendly}</Badge>;
       case "duplication":
-        return <Badge className="bg-purple-600 hover:bg-purple-700">Frame Duplication</Badge>;
+        return <Badge className="bg-purple-600 hover:bg-purple-700">{friendly}</Badge>;
       case "frame_drop":
-        return <Badge className="bg-amber-600 hover:bg-amber-700">Frame Drop</Badge>;
+      case "framedrop":
+        return <Badge className="bg-amber-600 hover:bg-amber-700">{friendly}</Badge>;
+      case "scene_cut":
+        return <Badge className="bg-indigo-600 hover:bg-indigo-700">{friendly}</Badge>;
       default:
-        return <Badge variant="secondary">{type}</Badge>;
+        return <Badge variant="secondary">{friendly}</Badge>;
     }
   };
 
@@ -425,11 +449,9 @@ export function AnalysisPage() {
                                 <span className={isLow ? "text-amber-700" : ""}>
                                   {(ev.confidence * 100).toFixed(1)}%
                                 </span>
-                                {ev.evidence_z != null && (
-                                  <span className="block text-[11px] text-muted-foreground font-normal">
-                                    Change vs normal: {ev.evidence_z.toFixed(1)}x
-                                  </span>
-                                )}
+                                <span className="block text-[11px] text-muted-foreground font-normal">
+                                  Change vs normal: {ev.evidence_z != null ? `${Number(ev.evidence_z).toFixed(1)}x` : "n/a"}
+                                </span>
                                 {isLow && (
                                   <span className="block text-[11px] text-amber-600 font-normal">
                                     Manual review needed
@@ -476,11 +498,9 @@ export function AnalysisPage() {
                             </span>
                           </div>
                           <div className="flex items-center gap-2">
-                            {ev.evidence_z != null && (
-                              <Badge variant="outline" className="text-xs border-slate-300 text-slate-700 bg-slate-50">
-                                Change vs normal: {ev.evidence_z.toFixed(1)}x
-                              </Badge>
-                            )}
+                            <Badge variant="outline" className="text-xs border-slate-300 text-slate-700 bg-slate-50">
+                              Change vs normal: {ev.evidence_z != null ? `${Number(ev.evidence_z).toFixed(1)}x` : "n/a"}
+                            </Badge>
                             <Badge
                               variant="outline"
                               className={`text-xs ${
@@ -581,7 +601,7 @@ export function AnalysisPage() {
                             stroke="#ef4444"
                             strokeDasharray="4 4"
                             label={{
-                              value: `${ev.edit_type} (f${ev.start_frame})`,
+                              value: `${getFriendlyName(ev.edit_type)} (f${ev.start_frame})`,
                               fill: "#dc2626",
                               fontSize: 11,
                               position: "top",

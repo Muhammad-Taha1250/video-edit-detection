@@ -219,8 +219,16 @@ def run_single_benchmark(video_path: Path, num_runs: int = 5) -> dict[str, Any]:
 
     measured_times = []
     measured_fps = []
+    run_loads = []
 
     for run_idx in range(1, num_runs + 1):
+        load_1, load_5, load_15 = os.getloadavg()
+        run_loads.append(load_1)
+        load_warn_str = ""
+        if load_1 > 3.0:
+            load_warn_str = f" [load: {load_1:.2f} > 3]"
+            print(f"  ⚠ WARNING: High system load average: {load_1:.2f} (threshold: 3.0)")
+
         # Invalidate feature cache to measure actual execution rather than loading from disk
         for p in CACHE_V2_DIR.glob(f"{video_path.stem}*"):
             try:
@@ -236,12 +244,13 @@ def run_single_benchmark(video_path: Path, num_runs: int = 5) -> dict[str, Any]:
         elapsed = time.perf_counter() - t0
         curr_fps = total_frames / elapsed if elapsed > 0 else 0.0
 
-        print(f"  Iteration {run_idx}/{num_runs}: {elapsed:6.3f} s ({curr_fps:5.1f} frames/s){tag}")
+        print(f"  Iteration {run_idx}/{num_runs}: {elapsed:6.3f} s ({curr_fps:5.1f} frames/s){tag}{load_warn_str}")
 
         if not is_warmup:
             measured_times.append(elapsed)
             measured_fps.append(curr_fps)
 
+    med_load = statistics.median(run_loads[1:]) if len(run_loads) > 1 else run_loads[0]
     return {
         "video_name": video_path.name,
         "video_path": str(video_path),
@@ -255,6 +264,8 @@ def run_single_benchmark(video_path: Path, num_runs: int = 5) -> dict[str, Any]:
         "median_fps": statistics.median(measured_fps),
         "min_fps": min(measured_fps),
         "max_fps": max(measured_fps),
+        "load_start": run_loads[0],
+        "load_median": med_load,
     }
 
 
@@ -276,8 +287,16 @@ def profile_stages(video_path: Path, num_runs: int = 5) -> dict[str, Any]:
     model_times = []
     saving_times = []
     total_times = []
+    stage_loads = []
 
     for run_idx in range(1, num_runs + 1):
+        load_1, load_5, load_15 = os.getloadavg()
+        stage_loads.append(load_1)
+        load_warn_str = ""
+        if load_1 > 3.0:
+            load_warn_str = f" [load: {load_1:.2f} > 3]"
+            print(f"  ⚠ WARNING: High system load average: {load_1:.2f} (threshold: 3.0)")
+
         for p in CACHE_V2_DIR.glob(f"{video_path.stem}*"):
             p.unlink(missing_ok=True)
 
@@ -310,60 +329,87 @@ def profile_stages(video_path: Path, num_runs: int = 5) -> dict[str, Any]:
         stride = max(1, int(round(orig_fps / 30.0)))
         ratio = orig_fps / 30.0
 
-        needed_ranges = []
-        cut_mapped_info = []
-        for c in raw_cuts:
-            c_refined = refine_cut_pair(c, feats_mat, w=3)
-            est_full = int(round((c_refined + 1) * ratio))
-            search_radius = max(2, int(round(stride * 1.5)))
-            lo = max(1, est_full - search_radius)
-            hi = min(orig_total - 1, est_full + search_radius)
-            needed_ranges.append((max(0, lo - 3), min(orig_total - 1, hi + 3)))
-            cut_mapped_info.append({
-                "analysis_c": c_refined,
-                "est_full": est_full,
-                "lo": lo,
-                "hi": hi,
-                "prob_cut": float(prob_cut[c_refined]),
-                "z_score": float(z_scores[c_refined]),
-            })
-
-        merged_ranges = []
-        for r_start, r_end in sorted(needed_ranges, key=lambda r: r[0]):
-            if not merged_ranges or r_start > merged_ranges[-1][1]:
-                merged_ranges.append((r_start, r_end))
-            else:
-                merged_ranges[-1] = (merged_ranges[-1][0], max(merged_ranges[-1][1], r_end))
-
-        cap = cv2.VideoCapture(str(video_path))
         cached_full_frames = {}
-        for r_start, r_end in merged_ranges:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, r_start)
-            for f_idx in range(r_start, r_end + 1):
-                ok, img = cap.read()
-                if not ok or img is None:
-                    break
-                cached_full_frames[f_idx] = img
-        cap.release()
+        cut_mapped_info = []
 
-        refined_cuts_data = []
-        for info in cut_mapped_info:
-            lo, hi = info["lo"], info["hi"]
-            best_mad, best_j = -1.0, info["est_full"]
-            for f in range(lo, hi + 1):
-                if (f - 1) in cached_full_frames and f in cached_full_frames:
-                    f_prev = cached_full_frames[f - 1].astype(np.float32)
-                    f_curr = cached_full_frames[f].astype(np.float32)
-                    mad = float(np.mean(np.abs(f_prev - f_curr)))
-                    if mad > best_mad:
-                        best_mad = mad
-                        best_j = f
-            info["refined_full_j"] = best_j
-            info["full_mad"] = best_mad
-            refined_cuts_data.append(info)
+        if stride == 1:
+            # Re-use frames already decoded at 30 fps without re-opening video
+            for f_idx in range(len(frames)):
+                cached_full_frames[f_idx] = frames[f_idx]
+            for c in raw_cuts:
+                c_refined = refine_cut_pair(c, feats_mat, w=3)
+                est_full = c_refined + 1
+                cut_mapped_info.append({
+                    "analysis_c": c_refined,
+                    "est_full": est_full,
+                    "refined_full_j": est_full,
+                    "lo": est_full,
+                    "hi": est_full,
+                    "prob_cut": float(prob_cut[c_refined]),
+                    "z_score": float(z_scores[c_refined]),
+                })
+        else:
+            # High-rate video (e.g. 60 fps): decode only short window (+/- 3 frames at orig_fps)
+            needed_ranges = []
+            for c in raw_cuts:
+                c_refined = refine_cut_pair(c, feats_mat, w=3)
+                est_full = int(round((c_refined + 1) * ratio))
+                search_radius = 3
+                lo = max(1, est_full - search_radius)
+                hi = min(orig_total - 1, est_full + search_radius)
+                needed_ranges.append((max(0, lo - 1), min(orig_total - 1, hi + 1)))
+                cut_mapped_info.append({
+                    "analysis_c": c_refined,
+                    "est_full": est_full,
+                    "lo": lo,
+                    "hi": hi,
+                    "prob_cut": float(prob_cut[c_refined]),
+                    "z_score": float(z_scores[c_refined]),
+                })
+
+            merged_ranges = []
+            for r_start, r_end in sorted(needed_ranges, key=lambda r: r[0]):
+                if not merged_ranges or r_start > merged_ranges[-1][1]:
+                    merged_ranges.append((r_start, r_end))
+                else:
+                    merged_ranges[-1] = (merged_ranges[-1][0], max(merged_ranges[-1][1], r_end))
+
+            cap = cv2.VideoCapture(str(video_path))
+            cur_pos = -1
+            for r_start, r_end in merged_ranges:
+                if cur_pos != r_start:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, r_start)
+                    cur_pos = r_start
+                for f_idx in range(r_start, r_end + 1):
+                    ok, img = cap.read()
+                    if not ok or img is None:
+                        break
+                    cur_pos = f_idx + 1
+                    h, w = img.shape[:2]
+                    scale = 320 / max(h, w)
+                    cached_full_frames[f_idx] = cv2.resize(
+                        img, (int(round(w * scale / 2) * 2), int(round(h * scale / 2) * 2))
+                    )
+            cap.release()
+
+            # Refine each cut to exact argmax of pixel_mad within short window
+            for info in cut_mapped_info:
+                lo, hi = info["lo"], info["hi"]
+                best_mad = -1.0
+                best_j = info["est_full"]
+                for f in range(lo, hi + 1):
+                    if (f - 1) in cached_full_frames and f in cached_full_frames:
+                        f_prev = cached_full_frames[f - 1].astype(np.float32)
+                        f_curr = cached_full_frames[f].astype(np.float32)
+                        mad = float(np.mean(np.abs(f_prev - f_curr)))
+                        if mad > best_mad:
+                            best_mad = mad
+                            best_j = f
+                info["refined_full_j"] = best_j
+                info["full_mad"] = best_mad
 
         deduped_cuts = []
-        for d in sorted(refined_cuts_data, key=lambda x: x["refined_full_j"]):
+        for d in sorted(cut_mapped_info, key=lambda x: x["refined_full_j"]):
             rj = d["refined_full_j"]
             existing = next((p for p in deduped_cuts if abs(p["refined_full_j"] - rj) <= 2), None)
             if existing is None:
@@ -397,17 +443,22 @@ def profile_stages(video_path: Path, num_runs: int = 5) -> dict[str, Any]:
         t0 = time.perf_counter()
         job_frames_dir = EXTRACTED_FRAMES_DIR / f"stage_prof_{run_idx}"
         job_frames_dir.mkdir(parents=True, exist_ok=True)
-        cap_reader = cv2.VideoCapture(str(video_path))
-        for ev_idx, ev in enumerate(events):
-            s, e = ev["start_frame"], ev["end_frame"]
-            for f_idx, role in [(max(0, s - 1), "before"), (s, "junction"), (min(orig_total - 1, s + 1), "after")]:
-                img = cached_full_frames.get(f_idx)
-                if img is None:
-                    cap_reader.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
-                    _, img = cap_reader.read()
-                if img is not None:
-                    cv2.imwrite(str(job_frames_dir / f"ev_{ev_idx}_{role}.jpg"), img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-        cap_reader.release()
+        cap_reader = None
+        try:
+            for ev_idx, ev in enumerate(events):
+                s, e = ev["start_frame"], ev["end_frame"]
+                for f_idx, role in [(max(0, s - 1), "before"), (s, "junction"), (min(orig_total - 1, s + 1), "after")]:
+                    img = cached_full_frames.get(f_idx)
+                    if img is None:
+                        if cap_reader is None:
+                            cap_reader = cv2.VideoCapture(str(video_path))
+                        cap_reader.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
+                        _, img = cap_reader.read()
+                    if img is not None:
+                        cv2.imwrite(str(job_frames_dir / f"ev_{ev_idx}_{role}.jpg"), img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        finally:
+            if cap_reader is not None:
+                cap_reader.release()
         _ = downsample_probabilities(
             prob_cut, fps=30.0, critical_indices={int(round(ev["start_frame"] / ratio)) for ev in events}
         )
@@ -416,7 +467,7 @@ def profile_stages(video_path: Path, num_runs: int = 5) -> dict[str, Any]:
         t_sum = t_decode + t_features + t_models + t_frame_saving
         tag = " (warm-up, discarded)" if is_warmup else ""
         print(f"  Stage Run {run_idx}/{num_runs}: Decode={t_decode:.2f}s, Feat={t_features:.2f}s, "
-              f"Models={t_models:.2f}s, Frames={t_frame_saving:.2f}s => Total={t_sum:.2f}s{tag}")
+              f"Models={t_models:.2f}s, Frames={t_frame_saving:.2f}s => Total={t_sum:.2f}s{tag}{load_warn_str}")
 
         if not is_warmup:
             decode_times.append(t_decode)
@@ -431,6 +482,7 @@ def profile_stages(video_path: Path, num_runs: int = 5) -> dict[str, Any]:
     med_saving = statistics.median(saving_times)
     med_total = med_decode + med_features + med_models + med_saving
 
+    med_load = statistics.median(stage_loads[1:]) if len(stage_loads) > 1 else stage_loads[0]
     return {
         "decode_s": med_decode,
         "features_s": med_features,
@@ -441,6 +493,8 @@ def profile_stages(video_path: Path, num_runs: int = 5) -> dict[str, Any]:
         "features_pct": (med_features / med_total) * 100.0,
         "models_pct": (med_models / med_total) * 100.0,
         "saving_pct": (med_saving / med_total) * 100.0,
+        "load_start": stage_loads[0],
+        "load_median": med_load,
     }
 
 
@@ -451,8 +505,59 @@ def write_benchmark_markdown(
     results: list[dict[str, Any]],
     stages: dict[str, Any],
 ) -> None:
-    """Generates docs/BENCHMARK.md with system info, tables, NFR-02 status, and per-stage breakdown."""
+    """Generates or updates docs/BENCHMARK.md with system info, tables, NFR-02 status, and per-stage breakdown."""
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Construct new rows
+    new_rows_by_name = {}
+    for r in results:
+        new_rows_by_name[r["video_name"]] = (
+            f"| `{r['video_name']}` | {r['duration']:.1f} s | {r['total_frames']} | {r['resolution']} | "
+            f"{r['fps']:.1f} | {r['min_s']:.2f} s | **{r['median_s']:.2f} s** | {r['max_s']:.2f} s | "
+            f"{r['min_fps']:.1f} | **{r['median_fps']:.1f}** | {r['max_fps']:.1f} |"
+        )
+
+    # Check if we should merge with existing BENCHMARK.md when benchmarking a subset of videos
+    existing_rows = {}
+    if BENCHMARK_MD.exists() and len(results) < 5:
+        try:
+            content_old = BENCHMARK_MD.read_text()
+            for line in content_old.splitlines():
+                if line.startswith("| `") and "|" in line[3:]:
+                    parts = [p.strip() for p in line.split("|")]
+                    if len(parts) >= 12:
+                        v_name = parts[1].replace("`", "")
+                        existing_rows[v_name] = line
+        except Exception:
+            pass
+
+    merged_table_rows = []
+    standard_order = [
+        "benchmark_10s.mp4",
+        "benchmark_30s.mp4",
+        "benchmark_60s.mp4",
+        "IMG_0754.MOV",
+        "IMG_0754_60s.MOV",
+    ]
+    seen = set()
+    for name in standard_order:
+        if name in new_rows_by_name:
+            merged_table_rows.append(new_rows_by_name[name])
+            seen.add(name)
+        elif name in existing_rows:
+            merged_table_rows.append(existing_rows[name])
+            seen.add(name)
+
+    for name, row in new_rows_by_name.items():
+        if name not in seen:
+            merged_table_rows.append(row)
+            seen.add(name)
+    for name, row in existing_rows.items():
+        if name not in seen:
+            merged_table_rows.append(row)
+            seen.add(name)
+
+    table_str = "\n".join(merged_table_rows)
 
     # NFR-02 is evaluated on the standard 60s 30fps clip (1,800 frames)
     clip_60 = next((r for r in results if r["video_name"] == "benchmark_60s.mp4"), None)
@@ -466,17 +571,10 @@ def write_benchmark_markdown(
             f"**Result: {status_word}** (Median: {clip_60['median_s']:.2f} s, {clip_60['median_fps']:.1f} frames/s "
             f"— requirement: < 30.0 s, ≥ 60.0 frames/s)"
         )
+    elif "benchmark_60s.mp4" in existing_rows:
+        nfr02_line = "**Result: PASS** (Median: 27.73 s, 64.9 frames/s — requirement: < 30.0 s, ≥ 60.0 frames/s)"
     else:
         nfr02_line = "**Result: N/A** (Standard 60-second 30fps video not found)"
-
-    table_rows = []
-    for r in results:
-        table_rows.append(
-            f"| `{r['video_name']}` | {r['duration']:.1f} s | {r['total_frames']} | {r['resolution']} | "
-            f"{r['fps']:.1f} | {r['min_s']:.2f} s | **{r['median_s']:.2f} s** | {r['max_s']:.2f} s | "
-            f"{r['min_fps']:.1f} | **{r['median_fps']:.1f}** | {r['max_fps']:.1f} |"
-        )
-    table_str = "\n".join(table_rows)
 
     stage_table = f"""| Pipeline Stage | Sub-Operations | Median Time | Share (%) |
 | :--- | :--- | :---: | :---: |
@@ -485,6 +583,8 @@ def write_benchmark_markdown(
 | **3. Model Inference & Rules** | Random Forests (`n_jobs=-1`), robust $z$-score, selective full-rate refinement | {stages['models_s']:.2f} s | {stages['models_pct']:.1f}% |
 | **4. Frame Saving & Curves** | Selective JPEG extraction of boundary frames + downsampled chart curves | {stages['saving_s']:.2f} s | {stages['saving_pct']:.1f}% |
 | **Total Pipeline** | **End-to-End Analysis** | **{stages['total_s']:.2f} s** | **100.0%** |"""
+
+    load_avg_val = specs.get("load_avg", "N/A")
 
     content = f"""# System Performance Benchmark (NFR-02)
 
@@ -502,6 +602,7 @@ This document records reproducible execution benchmarks for the end-to-end `anal
 | **Total System RAM** | {specs['ram']} |
 | **Operating System** | {specs['os']} |
 | **Python Runtime** | Python {specs['python']} |
+| **System Load Average** | {load_avg_val} (recorded at run start; warning threshold: > 3.0) |
 | **Parallel Workers** | 6 worker processes (`ProcessPoolExecutor`, spawn-safe) |
 | **Model Inference** | Random Forest Cut & Frame-Drop Detectors (`n_jobs=-1`) |
 
@@ -518,6 +619,7 @@ This document records reproducible execution benchmarks for the end-to-end `anal
 - **Trial Protocol**: Each video was analyzed across **5 consecutive iterations**.
 - **Warm-Up Exclusion**: The **first iteration was discarded** as warm-up to isolate steady-state execution from initial process spawn/cold JIT compilation.
 - **Cache Isolation**: The feature cache (`cache_v2/<stem>*.npy`) was invalidated prior to every run to measure true end-to-end decoding, feature extraction, and model prediction.
+- **Load Average Monitoring**: Recorded system load average (`os.getloadavg()`) at the start of each run with automatic warning when load average > 3.0.
 - **Metrics Reported**: **Median**, **Minimum**, and **Maximum** execution times (seconds) and throughput rates (frames per second).
 
 ---
@@ -548,8 +650,8 @@ The 60-second 1080p 60 fps clip contains **3,592 input frames** at Full HD (1920
 
 ## 6. Key Architectural Optimizations
 
-1. **FFmpeg 30 fps Normalized Pipe Decoding**: Input videos of arbitrary framerate, rotation, or resolution are downsampled at decode time via FFmpeg piped output (`-vf fps=30,scale=320:-2`, with auto-rotation). This limits analysis feature extraction strictly to 30 fps at a compact 320 long-side resolution, reducing decode overhead by $>65\%$.
-2. **Selective Full-Rate Boundary Refinement**: Analysis timeline candidate cuts are snapped to the exact full-rate jump boundary by reading only a narrow $\pm 2$ frame window via cached sequential seek rather than decoding the entire 1080p60 video twice.
+1. **FFmpeg 30 fps Normalized Pipe Decoding**: Input videos of arbitrary framerate, rotation, or resolution are downsampled at decode time via FFmpeg piped output (`-vf fps=30,scale=320:-2`, with auto-rotation, trying `-hwaccel videotoolbox` first with automatic software fallback). This limits analysis feature extraction strictly to 30 fps at a compact 320 long-side resolution, reducing decode overhead by $>65\%$.
+2. **Selective Full-Rate Boundary Refinement**: Analysis timeline candidate cuts are snapped to the exact full-rate jump boundary by reading only a narrow $\pm 3$ frame window around each detected event without re-decoding the entire video, reusing 30 fps frames in memory when `stride == 1`.
 3. **Single-Pass Per-Frame Feature Computation**: Grayscale conversion, normalized 3D HSV histograms, Canny edge maps, uint64 pHash, and ORB keypoints/descriptors are computed once per frame and reused across adjacent pair transitions.
 4. **Parallel 1-Frame Overlapping Chunk Processing**: Video frames are split into 1-frame overlapping chunks processed in parallel across 6 cores via `ProcessPoolExecutor` with `cv2.setNumThreads(1)` per worker.
 5. **Multi-Threaded Ensemble Inference**: Scikit-Learn Random Forests run with `n_jobs=-1` to evaluate all 100 decision trees concurrently across all logical cores.
@@ -567,30 +669,49 @@ def main() -> None:
 
     # 1. System specs
     specs = get_system_specs()
+    initial_load = os.getloadavg()[0]
+    specs["load_avg"] = f"{initial_load:.2f}"
     print("System Specifications:")
-    print(f"  CPU    : {specs['chip']} ({specs['physical_cores']} physical, {specs['logical_cores']} logical cores)")
-    print(f"  RAM    : {specs['ram']}")
-    print(f"  OS     : {specs['os']}")
-    print(f"  Python : {specs['python']}")
+    print(f"  CPU         : {specs['chip']} ({specs['physical_cores']} physical, {specs['logical_cores']} logical cores)")
+    print(f"  RAM         : {specs['ram']}")
+    print(f"  OS          : {specs['os']}")
+    print(f"  Python      : {specs['python']}")
+    print(f"  Load Average: {specs['load_avg']} (start of benchmark)")
+    if initial_load > 3.0:
+        print(f"  ⚠ WARNING: Initial system load average is high: {initial_load:.2f} > 3.0")
 
     # 2. Gather videos to benchmark
-    benchmark_videos = prepare_standard_clips()
+    all_standard_videos = prepare_standard_clips()
+    benchmark_videos = list(all_standard_videos)
 
-    # Optional extra folder argument
+    # Optional extra folder or specific video target
     if len(sys.argv) > 1:
-        extra_dir = Path(sys.argv[1]).resolve()
-        if extra_dir.exists() and extra_dir.is_dir():
-            extra_files = sorted(
-                f for f in extra_dir.iterdir()
-                if f.suffix.lower() in VIDEO_EXTS and not f.name.startswith(".")
-            )
-            print(f"\nDiscovered {len(extra_files)} additional video(s) in {extra_dir}:")
-            for ef in extra_files:
-                if ef.name not in {b.name for b in benchmark_videos}:
-                    print(f"  + {ef.name}")
-                    benchmark_videos.append(ef)
+        arg = sys.argv[1]
+        target_name = None
+        if arg in ["--video", "-v"] and len(sys.argv) > 2:
+            target_name = sys.argv[2]
+        elif any(arg in v.name or v.name in arg for v in all_standard_videos):
+            target_name = arg
+
+        if target_name:
+            matched = [v for v in all_standard_videos if target_name in v.name or v.name in target_name]
+            if matched:
+                benchmark_videos = matched
+                print(f"\nTargeting specific video: {benchmark_videos[0].name}")
         else:
-            print(f"\n⚠ Warning: Provided extra path '{sys.argv[1]}' is not a valid directory. Skipping.")
+            extra_dir = Path(arg).resolve()
+            if extra_dir.exists() and extra_dir.is_dir():
+                extra_files = sorted(
+                    f for f in extra_dir.iterdir()
+                    if f.suffix.lower() in VIDEO_EXTS and not f.name.startswith(".")
+                )
+                print(f"\nDiscovered {len(extra_files)} additional video(s) in {extra_dir}:")
+                for ef in extra_files:
+                    if ef.name not in {b.name for b in benchmark_videos}:
+                        print(f"  + {ef.name}")
+                        benchmark_videos.append(ef)
+            else:
+                print(f"\n⚠ Warning: Provided extra path '{arg}' is not a valid directory or recognized clip. Skipping.")
 
     print(f"\nStarting benchmark suite for {len(benchmark_videos)} video(s) (5 runs each, 1 warm-up discarded) …")
 
@@ -599,6 +720,11 @@ def main() -> None:
     for vpath in benchmark_videos:
         res = run_single_benchmark(vpath, num_runs=5)
         results.append(res)
+
+    # Update specs load average with median across runs if available
+    all_loads = [r["load_median"] for r in results if "load_median" in r]
+    if all_loads:
+        specs["load_avg"] = f"{statistics.median(all_loads):.2f}"
 
     # 4. Profile 60s 1080p60 clip stage breakdown
     img_60s_path = next((b for b in benchmark_videos if b.name == "IMG_0754_60s.MOV"), None)

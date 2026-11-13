@@ -35,6 +35,26 @@ const pool = mysql.createPool({
   connectionLimit: 10,
 });
 
+// Auto-run Migration 003: ensure nullable evidence_z column exists in edit_segments
+(async function ensureEvidenceZColumn() {
+  try {
+    const [cols] = await pool.query(`
+      SELECT COLUMN_NAME 
+      FROM INFORMATION_SCHEMA.COLUMNS 
+      WHERE TABLE_SCHEMA = DATABASE() 
+        AND TABLE_NAME = 'edit_segments' 
+        AND COLUMN_NAME = 'evidence_z'
+    `);
+    if (cols.length === 0) {
+      console.log("[Migration 003] Adding nullable evidence_z column to edit_segments...");
+      await pool.query("ALTER TABLE edit_segments ADD COLUMN evidence_z FLOAT NULL DEFAULT NULL");
+      console.log("[Migration 003] Column evidence_z added successfully.");
+    }
+  } catch (err) {
+    console.warn("[Migration 003] Notice checking/adding evidence_z column:", err.message);
+  }
+})();
+
 // Configure Multer storage and file filter
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -245,12 +265,13 @@ async function saveCompletedJobResults(videoId, result) {
       const sTime = ev.start_time !== undefined ? ev.start_time : sFrame / fps;
       const eTime = ev.end_time !== undefined ? ev.end_time : eFrame / fps;
       const conf = ev.confidence || 0.0;
+      const evidenceZ = ev.evidence_z !== undefined && ev.evidence_z !== null ? Number(ev.evidence_z) : null;
       const framesObj = ev.extracted_frames || {};
 
       await conn.query(
-        `INSERT INTO edit_segments (video_id, result_id, edit_type, start_frame, end_frame, start_time, end_time, confidence, extracted_frames)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [videoId, resultId, eType, sFrame, eFrame, sTime, eTime, conf, JSON.stringify(framesObj)]
+        `INSERT INTO edit_segments (video_id, result_id, edit_type, start_frame, end_frame, start_time, end_time, confidence, evidence_z, extracted_frames)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [videoId, resultId, eType, sFrame, eFrame, sTime, eTime, conf, evidenceZ, JSON.stringify(framesObj)]
       );
 
       const mm = Math.floor(sTime / 60)
@@ -390,6 +411,7 @@ app.get("/api/videos/:id/results", async (req, res) => {
 
     const events = segments.map((s) => ({
       ...s,
+      evidence_z: s.evidence_z !== null && s.evidence_z !== undefined ? Number(s.evidence_z) : null,
       extracted_frames:
         typeof s.extracted_frames === "string" ? JSON.parse(s.extracted_frames) : s.extracted_frames,
     }));

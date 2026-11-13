@@ -53,6 +53,7 @@ def decode_video_ffmpeg(
     """
     Decodes video frames using ffmpeg piped rawvideo with autorotation,
     fps normalization (target_fps=30), and scaling to long side 320.
+    Tries -hwaccel videotoolbox first and falls back to software decode on failure.
     Returns: (frames, orig_fps, orig_total_frames, orig_duration).
     """
     cap = cv2.VideoCapture(str(video_path))
@@ -65,21 +66,39 @@ def decode_video_ffmpeg(
 
     vf = f"scale={max_long_side}:{max_long_side}:force_original_aspect_ratio=decrease,fps={target_fps}"
 
-    # Probe 1 frame png to get (h, w) after autorotate and scaling
-    probe_cmd = [
-        "ffmpeg", "-v", "error", "-i", str(video_path),
-        "-vf", vf, "-vframes", "1", "-f", "image2", "-vcodec", "png", "-"
-    ]
-    png_bytes = subprocess.check_output(probe_cmd)
-    first_frame = cv2.imdecode(np.frombuffer(png_bytes, np.uint8), cv2.IMREAD_COLOR)
-    h, w = first_frame.shape[:2]
+    raw_bytes = None
+    h, w = 0, 0
 
-    # Stream all rawvideo frames
-    read_cmd = [
-        "ffmpeg", "-v", "error", "-i", str(video_path),
-        "-vf", vf, "-f", "rawvideo", "-pix_fmt", "bgr24", "-"
-    ]
-    raw_bytes = subprocess.check_output(read_cmd)
+    # 1. Try hardware acceleration (-hwaccel videotoolbox) first; fallback to software decode
+    for hw_args in [["-hwaccel", "videotoolbox"], []]:
+        try:
+            probe_cmd = (
+                ["ffmpeg", "-v", "error"]
+                + hw_args
+                + ["-i", str(video_path), "-vf", vf, "-vframes", "1", "-f", "image2", "-vcodec", "png", "-"]
+            )
+            png_bytes = subprocess.check_output(probe_cmd, stderr=subprocess.PIPE)
+            first_frame = cv2.imdecode(np.frombuffer(png_bytes, np.uint8), cv2.IMREAD_COLOR)
+            if first_frame is None:
+                continue
+            cur_h, cur_w = first_frame.shape[:2]
+
+            read_cmd = (
+                ["ffmpeg", "-v", "error"]
+                + hw_args
+                + ["-i", str(video_path), "-vf", vf, "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+            )
+            raw_bytes = subprocess.check_output(read_cmd, stderr=subprocess.PIPE)
+            if not raw_bytes:
+                continue
+            h, w = cur_h, cur_w
+            break
+        except Exception:
+            continue
+
+    if raw_bytes is None or h == 0 or w == 0:
+        raise RuntimeError(f"FFmpeg failed to decode video {video_path}")
+
     frame_size = h * w * 3
     n_frames = len(raw_bytes) // frame_size
     arr = np.frombuffer(raw_bytes[:n_frames * frame_size], dtype=np.uint8).reshape((n_frames, h, w, 3))
@@ -349,64 +368,89 @@ def analyze_video(
     stride = max(1, int(round(orig_fps / analysis_fps)))
     ratio = orig_fps / analysis_fps
 
-    needed_ranges = []
-    cut_mapped_info = []
-    for c in raw_cuts:
-        c_refined = refine_cut_pair(c, feats_mat, w=3)
-        est_full = int(round((c_refined + 1) * ratio))
-        search_radius = max(2, int(round(stride * 1.5)))
-        lo = max(1, est_full - search_radius)
-        hi = min(orig_total - 1, est_full + search_radius)
-        needed_ranges.append((max(0, lo - 3), min(orig_total - 1, hi + 3)))
-        cut_mapped_info.append({
-            "analysis_c": c_refined,
-            "est_full": est_full,
-            "lo": lo,
-            "hi": hi,
-            "prob_cut": float(prob_cut[c_refined]),
-            "z_score": float(z_scores[c_refined]),
-        })
-
-    # Merge overlapping ranges and read needed full-rate frames in forward sequential order
-    merged_ranges: list[tuple[int, int]] = []
-    for r_start, r_end in sorted(needed_ranges, key=lambda r: r[0]):
-        if not merged_ranges or r_start > merged_ranges[-1][1]:
-            merged_ranges.append((r_start, r_end))
-        else:
-            merged_ranges[-1] = (merged_ranges[-1][0], max(merged_ranges[-1][1], r_end))
-
-    cap = cv2.VideoCapture(str(video_path))
     cached_full_frames: dict[int, np.ndarray] = {}
-    for r_start, r_end in merged_ranges:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, r_start)
-        for f_idx in range(r_start, r_end + 1):
-            ok, img = cap.read()
-            if not ok or img is None:
-                break
-            cached_full_frames[f_idx] = img
-    cap.release()
+    cut_mapped_info: list[dict] = []
 
-    # Refine each cut to exact argmax of full-rate pixel_mad
-    refined_cuts_data = []
-    for info in cut_mapped_info:
-        lo, hi = info["lo"], info["hi"]
-        best_mad = -1.0
-        best_j = info["est_full"]
-        for f in range(lo, hi + 1):
-            if (f - 1) in cached_full_frames and f in cached_full_frames:
-                f_prev = cached_full_frames[f - 1].astype(np.float32)
-                f_curr = cached_full_frames[f].astype(np.float32)
-                mad = float(np.mean(np.abs(f_prev - f_curr)))
-                if mad > best_mad:
-                    best_mad = mad
-                    best_j = f
-        info["refined_full_j"] = best_j
-        info["full_mad"] = best_mad
-        refined_cuts_data.append(info)
+    if stride == 1:
+        # Re-use frames already decoded at 30 fps without re-opening video
+        for f_idx in range(len(frames)):
+            cached_full_frames[f_idx] = frames[f_idx]
+        for c in raw_cuts:
+            c_refined = refine_cut_pair(c, feats_mat, w=3)
+            est_full = c_refined + 1
+            cut_mapped_info.append({
+                "analysis_c": c_refined,
+                "est_full": est_full,
+                "refined_full_j": est_full,
+                "lo": est_full,
+                "hi": est_full,
+                "prob_cut": float(prob_cut[c_refined]),
+                "z_score": float(z_scores[c_refined]),
+            })
+    else:
+        # High-rate video (e.g. 60 fps): decode only short window (+/- 3 frames at orig_fps)
+        needed_ranges: list[tuple[int, int]] = []
+        for c in raw_cuts:
+            c_refined = refine_cut_pair(c, feats_mat, w=3)
+            est_full = int(round((c_refined + 1) * ratio))
+            search_radius = 3
+            lo = max(1, est_full - search_radius)
+            hi = min(orig_total - 1, est_full + search_radius)
+            needed_ranges.append((max(0, lo - 1), min(orig_total - 1, hi + 1)))
+            cut_mapped_info.append({
+                "analysis_c": c_refined,
+                "est_full": est_full,
+                "lo": lo,
+                "hi": hi,
+                "prob_cut": float(prob_cut[c_refined]),
+                "z_score": float(z_scores[c_refined]),
+            })
+
+        # Merge overlapping ranges and read needed full-rate frames in forward sequential order
+        merged_ranges: list[tuple[int, int]] = []
+        for r_start, r_end in sorted(needed_ranges, key=lambda r: r[0]):
+            if not merged_ranges or r_start > merged_ranges[-1][1]:
+                merged_ranges.append((r_start, r_end))
+            else:
+                merged_ranges[-1] = (merged_ranges[-1][0], max(merged_ranges[-1][1], r_end))
+
+        cap = cv2.VideoCapture(str(video_path))
+        cur_pos = -1
+        for r_start, r_end in merged_ranges:
+            if cur_pos != r_start:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, r_start)
+                cur_pos = r_start
+            for f_idx in range(r_start, r_end + 1):
+                ok, img = cap.read()
+                if not ok or img is None:
+                    break
+                cur_pos = f_idx + 1
+                h, w = img.shape[:2]
+                scale = 320 / max(h, w)
+                cached_full_frames[f_idx] = cv2.resize(
+                    img, (int(round(w * scale / 2) * 2), int(round(h * scale / 2) * 2))
+                )
+        cap.release()
+
+        # Refine each cut to exact argmax of pixel_mad within short window
+        for info in cut_mapped_info:
+            lo, hi = info["lo"], info["hi"]
+            best_mad = -1.0
+            best_j = info["est_full"]
+            for f in range(lo, hi + 1):
+                if (f - 1) in cached_full_frames and f in cached_full_frames:
+                    f_prev = cached_full_frames[f - 1].astype(np.float32)
+                    f_curr = cached_full_frames[f].astype(np.float32)
+                    mad = float(np.mean(np.abs(f_prev - f_curr)))
+                    if mad > best_mad:
+                        best_mad = mad
+                        best_j = f
+            info["refined_full_j"] = best_j
+            info["full_mad"] = best_mad
 
     # Deduplicate junctions that snapped to the same frame (within +/-2 frames)
     deduped_cuts: list[dict] = []
-    for d in sorted(refined_cuts_data, key=lambda x: x["refined_full_j"]):
+    for d in sorted(cut_mapped_info, key=lambda x: x["refined_full_j"]):
         rj = d["refined_full_j"]
         existing = next((p for p in deduped_cuts if abs(p["refined_full_j"] - rj) <= 2), None)
         if existing is None:

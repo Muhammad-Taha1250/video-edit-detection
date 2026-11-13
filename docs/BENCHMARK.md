@@ -14,6 +14,7 @@ This document records reproducible execution benchmarks for the end-to-end `anal
 | **Total System RAM** | 16.0 GB |
 | **Operating System** | macOS 15.8.1 (Build 24H32) |
 | **Python Runtime** | Python 3.11.18 |
+| **System Load Average** | 13.99 (recorded at run start; warning threshold: > 3.0) |
 | **Parallel Workers** | 6 worker processes (`ProcessPoolExecutor`, spawn-safe) |
 | **Model Inference** | Random Forest Cut & Frame-Drop Detectors (`n_jobs=-1`) |
 
@@ -30,6 +31,7 @@ This document records reproducible execution benchmarks for the end-to-end `anal
 - **Trial Protocol**: Each video was analyzed across **5 consecutive iterations**.
 - **Warm-Up Exclusion**: The **first iteration was discarded** as warm-up to isolate steady-state execution from initial process spawn/cold JIT compilation.
 - **Cache Isolation**: The feature cache (`cache_v2/<stem>*.npy`) was invalidated prior to every run to measure true end-to-end decoding, feature extraction, and model prediction.
+- **Load Average Monitoring**: Recorded system load average (`os.getloadavg()`) at the start of each run with automatic warning when load average > 3.0.
 - **Metrics Reported**: **Median**, **Minimum**, and **Maximum** execution times (seconds) and throughput rates (frames per second).
 
 ---
@@ -42,7 +44,7 @@ This document records reproducible execution benchmarks for the end-to-end `anal
 | `benchmark_30s.mp4` | 30.0 s | 900 | 640x480 | 30.0 | 10.48 s | **17.48 s** | 29.21 s | 30.8 | **53.7** | 85.9 |
 | `benchmark_60s.mp4` | 60.0 s | 1800 | 640x480 | 30.0 | 26.40 s | **27.73 s** | 28.94 s | 62.2 | **64.9** | 68.2 |
 | `IMG_0754.MOV` | 17.1 s | 1026 | 1080x1920 | 60.0 | 17.92 s | **19.13 s** | 19.72 s | 52.0 | **53.6** | 57.3 |
-| `IMG_0754_60s.MOV` | 60.0 s | 3592 | 1080x1920 | 59.8 | 92.38 s | **100.74 s** | 102.12 s | 35.2 | **35.7** | 38.9 |
+| `IMG_0754_60s.MOV` | 60.0 s | 3592 | 1080x1920 | 59.8 | 44.26 s | **46.72 s** | 47.39 s | 75.8 | **76.9** | 81.2 |
 
 ---
 
@@ -60,18 +62,18 @@ The 60-second 1080p 60 fps clip contains **3,592 input frames** at Full HD (1920
 
 | Pipeline Stage | Sub-Operations | Median Time | Share (%) |
 | :--- | :--- | :---: | :---: |
-| **1. Video Decode & Scale** | FFmpeg pipe decode (`-vf fps=30,scale=320:-2`, auto-rotate) | 30.73 s | 41.5% |
-| **2. Feature Extraction** | 27 temporal features via 6-worker `ProcessPoolExecutor` + $w=15$ stacking | 27.42 s | 37.0% |
-| **3. Model Inference & Rules** | Random Forests (`n_jobs=-1`), robust $z$-score, selective full-rate refinement | 15.29 s | 20.6% |
-| **4. Frame Saving & Curves** | Selective JPEG extraction of boundary frames + downsampled chart curves | 0.66 s | 0.9% |
-| **Total Pipeline** | **End-to-End Analysis** | **74.11 s** | **100.0%** |
+| **1. Video Decode & Scale** | FFmpeg pipe decode (`-vf fps=30,scale=320:-2`, auto-rotate) | 26.73 s | 43.7% |
+| **2. Feature Extraction** | 27 temporal features via 6-worker `ProcessPoolExecutor` + $w=15$ stacking | 23.93 s | 39.1% |
+| **3. Model Inference & Rules** | Random Forests (`n_jobs=-1`), robust $z$-score, selective full-rate refinement | 10.46 s | 17.1% |
+| **4. Frame Saving & Curves** | Selective JPEG extraction of boundary frames + downsampled chart curves | 0.07 s | 0.1% |
+| **Total Pipeline** | **End-to-End Analysis** | **61.19 s** | **100.0%** |
 
 ---
 
 ## 6. Key Architectural Optimizations
 
-1. **FFmpeg 30 fps Normalized Pipe Decoding**: Input videos of arbitrary framerate, rotation, or resolution are downsampled at decode time via FFmpeg piped output (`-vf fps=30,scale=320:-2`, with auto-rotation). This limits analysis feature extraction strictly to 30 fps at a compact 320 long-side resolution, reducing decode overhead by $>65\%$.
-2. **Selective Full-Rate Boundary Refinement**: Analysis timeline candidate cuts are snapped to the exact full-rate jump boundary by reading only a narrow $\pm 2$ frame window via cached sequential seek rather than decoding the entire 1080p60 video twice.
+1. **FFmpeg 30 fps Normalized Pipe Decoding**: Input videos of arbitrary framerate, rotation, or resolution are downsampled at decode time via FFmpeg piped output (`-vf fps=30,scale=320:-2`, with auto-rotation, trying `-hwaccel videotoolbox` first with automatic software fallback). This limits analysis feature extraction strictly to 30 fps at a compact 320 long-side resolution, reducing decode overhead by $>65\%$.
+2. **Selective Full-Rate Boundary Refinement**: Analysis timeline candidate cuts are snapped to the exact full-rate jump boundary by reading only a narrow $\pm 3$ frame window around each detected event without re-decoding the entire video, reusing 30 fps frames in memory when `stride == 1`.
 3. **Single-Pass Per-Frame Feature Computation**: Grayscale conversion, normalized 3D HSV histograms, Canny edge maps, uint64 pHash, and ORB keypoints/descriptors are computed once per frame and reused across adjacent pair transitions.
 4. **Parallel 1-Frame Overlapping Chunk Processing**: Video frames are split into 1-frame overlapping chunks processed in parallel across 6 cores via `ProcessPoolExecutor` with `cv2.setNumThreads(1)` per worker.
 5. **Multi-Threaded Ensemble Inference**: Scikit-Learn Random Forests run with `n_jobs=-1` to evaluate all 100 decision trees concurrently across all logical cores.
